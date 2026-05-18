@@ -2,7 +2,7 @@
 
 **Project:** LuckySIM Shipping Notification Automation  
 **Source:** n8n workflow `20250531 | LuckySIM Shipped Notification`  
-**Target:** Google Apps Script (standalone or container-bound to the LuckySIM spreadsheet)  
+**Target:** Google Apps Script — **container-bound** to the LuckySIM spreadsheet  
 **Prepared for:** Claude Code implementation
 
 ---
@@ -53,6 +53,7 @@ The script must resolve column indices by **header name** (row 1), not by hard-c
 | `shipping_address_line` | Email body | Read |
 | `activate_date` | Email body | Read |
 | `shipped?` | Eligibility filter (must be `true`) | Read |
+| `Applied?` | Eligibility filter (must be `true` — confirms porting application submitted) | Read |
 | `shipping_noti_sent?` | Eligibility filter + mark as sent | Read + Write |
 
 > **Checkbox values in Apps Script:** `getValues()` returns actual booleans (`true`/`false`) for Google Sheets checkbox cells. Do NOT compare against the strings `"TRUE"` / `"FALSE"` or `"=true"`.  
@@ -62,15 +63,19 @@ The script must resolve column indices by **header name** (row 1), not by hard-c
 
 ## 3. Eligibility Criteria
 
-A row qualifies for a shipping notification if **all three** conditions are met:
+A row qualifies for a shipping notification if **all four** conditions are met:
 
 ```
 row['shipping_noti_sent?'] === false   // not yet notified
 AND
-row['shipped?'] === true               // physically mailed
+row['Applied?'] === true               // porting application has been submitted
+AND
+row['shipped?'] === true               // SIM card physically mailed
 AND
 row['tracking_id'] !== ''              // tracking number exists
 ```
+
+> **Note:** `Applied?` being `true` does not mean porting was successful — it only means the application has been submitted. Porting success is only confirmed on the client's chosen `activate_date`. This flag is set manually by the team.
 
 ---
 
@@ -113,22 +118,27 @@ function triggerManualSend() {
 
 ```
 function sendShippingNotifications():
-  1. Open spreadsheet by ID (SPREADSHEET_ID constant)
+  1. Get active spreadsheet via SpreadsheetApp.getActiveSpreadsheet()
+     (container-bound — no openById() needed)
   2. Get sheet "First Submission"
   3. Read all values (getValues()) — returns 2D array
   4. Row 0 is the header row → build a column index map: { columnName: colIndex }
   5. For each data row (rows 1..end):
      a. Read fields using column index map
      b. Skip if shipping_noti_sent? !== false
-     c. Skip if shipped? !== true
-     d. Skip if tracking_id is empty/blank
-     e. Build HTML email body (see Section 7)
-     f. Call sendGridEmail(to, subject, htmlBody)
-     g. If sendGridEmail succeeds:
+     c. Skip if Applied? !== true
+     d. Skip if shipped? !== true
+     e. Skip if tracking_id is empty/blank
+     f. Build HTML email body (see Section 7)
+     g. Call sendGridEmail(to, subject, htmlBody)
+     h. If sendGridEmail succeeds:
         - Update cell at (rowIndex, shipping_noti_sent? colIndex) to TRUE
-     h. If sendGridEmail throws:
+     i. If sendGridEmail throws:
         - Log error with row identifier (phone_hk)
+        - Add row to failedRows array
         - Continue to next row (do NOT mark as sent)
+  6. After processing all rows, if failedRows is not empty:
+     - Call sendErrorAlertEmail(failedRows)
 ```
 
 ### Key Notes
@@ -247,6 +257,8 @@ Store all configuration at the top of the script file. **Do not hardcode the API
 
 ```javascript
 // ── Constants ──────────────────────────────────────────────────
+// Container-bound: use SpreadsheetApp.getActiveSpreadsheet() instead of openById().
+// SPREADSHEET_ID is kept here for reference/documentation only.
 const SPREADSHEET_ID = '13CtkHUt-Cmia8rC3gL2AWCWcM7eo-v9V8mftC5g4iKk';
 const SHEET_NAME = 'First Submission';
 const FROM_EMAIL = 'sim@flyasia.co';
@@ -276,7 +288,27 @@ function setApiKey() {
   - Script start time and number of eligible rows found
   - Each row processed: `phone_hk`, `email`, success/failure
   - Any SendGrid error response body
-- Optionally: send an error summary email to an admin address (`sim@flyasia.co`) if any rows fail
+
+### Error Alert Email
+
+If one or more rows fail to send, dispatch a summary alert email using `GmailApp.sendEmail()` (available to container-bound scripts without extra OAuth):
+
+- **To:** `luckysim.flyasia@gmail.com`
+- **Subject:** `[LuckySIM] Shipping notification failed for ${failedRows.length} row(s)`
+- **Body (plain text):** List each failed row with `phone_hk`, `email`, and the error message received from SendGrid
+
+```javascript
+function sendErrorAlertEmail(failedRows) {
+  const subject = `[LuckySIM] Shipping notification failed for ${failedRows.length} row(s)`;
+  const body = failedRows.map(r =>
+    `phone_hk: ${r.phone_hk}\nemail: ${r.email}\nerror: ${r.error}`
+  ).join('\n\n---\n\n');
+
+  GmailApp.sendEmail('luckysim.flyasia@gmail.com', subject, body);
+}
+```
+
+> Failed rows are **not** marked as sent, so the next 5pm scheduled run will automatically retry them.
 
 ---
 
@@ -286,12 +318,13 @@ Suggested file layout for a single `.gs` file (or split by concern):
 
 ```
 Code.gs
-  ├─ onOpen()                    // Adds LuckySIM menu
-  ├─ triggerManualSend()         // Menu action / manual entry point
-  ├─ sendShippingNotifications() // Main logic
-  ├─ buildEmailHtml(row)         // HTML template builder
-  ├─ sendGridEmail(to, subj, html) // SendGrid API call
-  └─ getColMap(headers)          // Helper: header array → { name: index } map
+  ├─ onOpen()                        // Adds LuckySIM menu
+  ├─ triggerManualSend()             // Menu action / manual entry point
+  ├─ sendShippingNotifications()     // Main logic
+  ├─ buildEmailHtml(row)             // HTML template builder
+  ├─ sendGridEmail(to, subj, html)   // SendGrid API call
+  ├─ sendErrorAlertEmail(failedRows) // Alert to luckysim.flyasia@gmail.com on failure
+  └─ getColMap(headers)              // Helper: header array → { name: index } map
 ```
 
 ---
@@ -323,10 +356,10 @@ dataRows.forEach((row, i) => {
 
 ## 12. Deployment Checklist
 
-1. **Create script:** In the LuckySIM Google Sheet → *Extensions → Apps Script*, or as a new standalone project
+1. **Open script editor:** In the LuckySIM Google Sheet → *Extensions → Apps Script* (this creates a container-bound project automatically)
 2. **Set timezone:** Project Settings → Time zone → `Asia/Hong_Kong`
 3. **Set API key:** Run `setApiKey()` once, then delete the function
-4. **Authorize:** Run `sendShippingNotifications()` manually once to trigger OAuth consent for Sheets + UrlFetch scopes
+4. **Authorize:** Run `sendShippingNotifications()` manually once to trigger OAuth consent — because the script is container-bound, Sheets access is granted automatically; only `UrlFetchApp` (for SendGrid) needs explicit approval
 5. **Create scheduled trigger:**
    - Apps Script editor → *Triggers* → *Add Trigger*
    - Function: `sendShippingNotifications`
