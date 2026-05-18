@@ -27,7 +27,8 @@ function triggerManualSend() {
 // ── Main Logic ─────────────────────────────────────────────────
 
 function sendShippingNotifications() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
   const allValues = sheet.getDataRange().getValues();
   const colMap = getColMap(allValues[0]);
   const dataRows = allValues.slice(1);
