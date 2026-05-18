@@ -1,6 +1,21 @@
 # LuckySIM Shipping Notification — Apps Script Setup Guide
 
-This guide walks through deploying `Code.gs` as a container-bound Google Apps Script on the LuckySIM spreadsheet.
+This guide walks through deploying `Code.gs` as a Google Apps Script on the LuckySIM spreadsheet.
+
+---
+
+## What the Script Does
+
+Each run of `sendShippingNotifications()`:
+
+1. Reads all rows in the **First Submission** sheet
+2. Finds rows where all four eligibility conditions are met (see [Eligibility Criteria](#eligibility-criteria) below)
+3. Sends a shipping notification email to each eligible customer via SendGrid
+4. Marks the row's `shipping_noti_sent?` checkbox as **TRUE**
+5. On completion, emails `luckysim.flyasia@gmail.com` a summary of how many notifications were sent
+6. If any rows fail, emails `luckysim.flyasia@gmail.com` a separate error alert listing the failures (no personal info other than phone number and email address)
+
+Failed rows are **not** marked as sent — the next scheduled run retries them automatically.
 
 ---
 
@@ -16,7 +31,9 @@ This guide walks through deploying `Code.gs` as a container-bound Google Apps Sc
 
 1. Open the LuckySIM Google Sheet.
 2. In the top menu, click **Extensions → Apps Script**.
-3. A new browser tab opens with the Apps Script editor. The project is automatically container-bound to the sheet.
+3. A new browser tab opens with the Apps Script editor.
+
+> **Important:** Always open Apps Script from **Extensions → Apps Script** inside the Google Sheet — do not go to script.google.com directly. Opening it from the sheet creates a container-bound project, which is required for the custom menu (Step 7) to work.
 
 ### Troubleshooting: "Sorry, unable to open the file at present"
 
@@ -49,9 +66,11 @@ If you are using a **Google Workspace** (company/school) account and the above f
 ## Step 2 — Paste the Script
 
 1. In the editor, click on the default file `Code.gs` in the left sidebar.
-2. **Select all** existing content and delete it.
-3. Copy the full contents of [`Code.gs`](./Code.gs) from this repository and paste it in.
-4. Click the **Save** icon (or press `Ctrl+S` / `Cmd+S`).
+2. **Select all** existing content (`Ctrl+A` / `Cmd+A`) and delete it.
+3. Open [`Code.gs`](./Code.gs) in this repository, click the **Copy raw file** button (top-right of the code block), and paste it into the editor.
+4. Press `Ctrl+S` / `Cmd+S` to save — you should see **"Saved"** in the top bar.
+
+> Make sure you are viewing the correct branch (`claude/n8n-to-appscript-migration-LAg44`) when copying — the main branch may not have the latest code.
 
 ---
 
@@ -70,22 +89,19 @@ If you are using a **Google Workspace** (company/school) account and the above f
 
 The API key is stored in Apps Script's **Script Properties** — it is never written in the source code.
 
-### 4.1 Open the Script Properties panel
-
 1. In the Apps Script editor, click **⚙️ Project Settings** in the left sidebar.
 2. Scroll down to the **Script Properties** section.
 3. Click **Add script property**.
-
-### 4.2 Add the property
+4. Fill in:
 
 | Field | Value |
 |---|---|
 | **Property** | `SENDGRID_API_KEY` |
 | **Value** | `SG.your_actual_key_here` |
 
-4. Click **Save script properties**.
+5. Click **Save script properties**.
 
-> Your API key is now securely stored. The script retrieves it at runtime via `PropertiesService.getScriptProperties().getProperty('SENDGRID_API_KEY')` and it will never appear in the source code or logs.
+> Your API key is now securely stored. The script retrieves it at runtime and it will never appear in source code or logs.
 
 ---
 
@@ -100,7 +116,7 @@ The first time the script runs, Google will ask for OAuth consent.
 5. You may see a **"Google hasn't verified this app"** warning — click **Advanced → Go to [project name] (unsafe)**.
 6. Review the permissions requested (Google Sheets, Gmail, external URL fetch) and click **Allow**.
 
-The script will run once. Check the **Executions** log (left sidebar → clock icon) to confirm it ran without errors.
+The script will run once. Check the **Executions** log (left sidebar → clock icon) to confirm it completed without errors.
 
 ---
 
@@ -124,13 +140,27 @@ The script will run once. Check the **Executions** log (left sidebar → clock i
 
 ---
 
-## Step 7 — Test the Manual Menu
+## Step 7 — Set Up the Manual Menu
 
-1. Go back to the **LuckySIM Google Sheet** (not the script editor).
-2. Refresh the page.
-3. A new **LuckySIM** menu should appear in the top menu bar.
-4. Click **LuckySIM → Send Shipping Notifications Now**.
-5. The script runs immediately. Switch to the Apps Script editor and check **Executions** to see the log output.
+The script adds a **LuckySIM** menu to the spreadsheet for triggering a send manually. This requires creating an installable trigger for `onOpen`.
+
+1. In the Apps Script editor, click the **clock icon (Triggers)** in the left sidebar.
+2. Click **+ Add Trigger** (bottom right).
+3. Configure as follows:
+
+| Setting | Value |
+|---|---|
+| **Choose which function to run** | `onOpen` |
+| **Choose which deployment should run** | Head |
+| **Select event source** | From spreadsheet |
+| **Select event type** | On open |
+
+4. Click **Save**.
+5. Go back to the **LuckySIM Google Sheet** and refresh the page.
+6. A **LuckySIM** menu should now appear in the top menu bar.
+7. Click **LuckySIM → Send Shipping Notifications Now** to trigger a manual send.
+
+> **Note:** The **From spreadsheet** event source only appears if the script was opened via **Extensions → Apps Script** from inside the sheet (container-bound). If you only see "Time-driven" and "From calendar", the script is standalone — go back to Step 1 and reopen the editor from the sheet.
 
 ---
 
@@ -140,12 +170,13 @@ After the script runs, confirm:
 
 - [ ] Rows that met all eligibility criteria have their `shipping_noti_sent?` checkbox flipped to **TRUE**
 - [ ] Customers received the shipping notification email
+- [ ] `luckysim.flyasia@gmail.com` received a success summary email: `[LuckySIM] X shipping notification(s) sent successfully`
 - [ ] The **Executions** log shows: `Done. Sent: X, Failed: 0`
-- [ ] If any rows failed, an alert email was sent to `luckysim.flyasia@gmail.com`
+- [ ] If any rows failed, a separate error alert was sent to `luckysim.flyasia@gmail.com`
 
 ---
 
-## Eligibility Criteria (recap)
+## Eligibility Criteria
 
 A row is processed only if **all four** conditions are true:
 
@@ -166,6 +197,8 @@ Failed rows are **not** marked as sent, so the next scheduled run will automatic
 |---|---|---|
 | `SendGrid error 401` | API key missing or wrong | Re-check Script Properties → `SENDGRID_API_KEY` |
 | `SendGrid error 403` | API key lacks Mail Send permission | Regenerate key in SendGrid dashboard with **Mail Send** scope |
-| No LuckySIM menu in sheet | `onOpen` hasn't run yet | Refresh the sheet; or run `onOpen` manually from the editor |
+| No LuckySIM menu in sheet | `onOpen` installable trigger not created | Follow Step 7 to create an installable On open trigger |
+| "From spreadsheet" missing in trigger setup | Script is standalone, not container-bound | Re-do Step 1 — open Apps Script from **Extensions → Apps Script** inside the sheet |
 | Trigger fires at wrong time | Timezone not set | Re-do Step 3 — set timezone to `Asia/Hong_Kong`, then delete and recreate the trigger |
 | `Exception: You do not have permission` | OAuth not granted | Re-do Step 5 — run the function manually to trigger the consent screen |
+| No success summary email received | No eligible rows that run | Check that at least one row meets all four eligibility criteria |
