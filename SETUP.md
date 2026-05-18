@@ -18,6 +18,32 @@ This guide walks through deploying `Code.gs` as a container-bound Google Apps Sc
 2. In the top menu, click **Extensions → Apps Script**.
 3. A new browser tab opens with the Apps Script editor. The project is automatically container-bound to the sheet.
 
+### Troubleshooting: "Sorry, unable to open the file at present"
+
+This error almost always means the browser has **multiple Google accounts signed in** and the wrong one is being used to open Apps Script.
+
+**Fix A — Use an Incognito / Private window (quickest)**
+
+1. Open a new **Incognito** (Chrome) or **Private** (Firefox/Safari) window.
+2. Go to [sheets.google.com](https://sheets.google.com) and sign in with **only** the account that has edit access to the LuckySIM sheet.
+3. Open the sheet, then click **Extensions → Apps Script** again.
+
+**Fix B — Switch to the correct account in the URL**
+
+When the error page appears, look at the URL — it will contain `/u/0/`, `/u/1/`, `/u/2/`, etc. The number is the account index.
+
+1. Note which Google accounts are signed in (click your profile icon in any Google page — account 0 is the first, 1 is the second, etc.).
+2. Identify which account owns / has edit access to the sheet.
+3. Change the number in the URL to match that account. For example, if the correct account is the second one signed in, change `/u/0/` → `/u/1/`.
+4. Press Enter to reload.
+
+**Fix C — Check Google Workspace admin restrictions**
+
+If you are using a **Google Workspace** (company/school) account and the above fixes don't work, Apps Script may be disabled by your organisation's admin.
+
+1. Ask your Google Workspace administrator to enable Apps Script at: **Admin Console → Apps → Google Workspace → Drive and Docs → Features and Applications → Allow users to create and run Google Apps Script**.
+2. Alternatively, use a personal Gmail account that also has edit access to the sheet.
+
 ---
 
 ## Step 2 — Paste the Script
