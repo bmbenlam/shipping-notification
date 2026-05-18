@@ -438,7 +438,7 @@ function buildEmailHtml(row) {
 
 function getColMap(headers) {
   const map = {};
-  headers.forEach((h, i) => { if (typeof h === 'string' && h.trim()) map[h.trim()] = i; });
+  headers.forEach((h, i) => { const k = String(h).trim(); if (k) map[k] = i; });
   return map;
 }
 
