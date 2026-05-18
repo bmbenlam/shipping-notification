@@ -74,11 +74,21 @@ function sendShippingNotifications() {
     }
   }
 
+  const sentCount = eligible.length - failedRows.length;
+
   if (failedRows.length > 0) {
     sendErrorAlertEmail(failedRows);
   }
 
-  console.log(`[${new Date().toISOString()}] Done. Sent: ${eligible.length - failedRows.length}, Failed: ${failedRows.length}`);
+  if (sentCount > 0) {
+    GmailApp.sendEmail(
+      ERROR_ALERT_EMAIL,
+      `[LuckySIM] ${sentCount} shipping notification(s) sent successfully`,
+      `${sentCount} shipping notification email(s) were sent successfully on ${new Date().toLocaleString('en-HK', { timeZone: 'Asia/Hong_Kong' })}.`
+    );
+  }
+
+  console.log(`[${new Date().toISOString()}] Done. Sent: ${sentCount}, Failed: ${failedRows.length}`);
 }
 
 // ── SendGrid API Call ───────────────────────────────────────────
