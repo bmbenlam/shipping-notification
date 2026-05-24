@@ -190,7 +190,7 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
       </p>
 
       <p>
-        Could you please provide a tax invoice made out to <strong>FlyAsia Ltd.</strong>
+        Could you please provide a tax invoice made out to <strong>Summarize Limited</strong>
         for the commission amount of <strong>HK$${commission.toFixed(2)}</strong>?
       </p>
 
@@ -220,14 +220,28 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
         </tfoot>
       </table>
 
-      <p>Please send the invoice to <a href="mailto:sim@flyasia.co">sim@flyasia.co</a> at your earliest convenience.</p>
+      <p>Please send the invoice to <a href="mailto:info@flyasia.co">info@flyasia.co</a> at your earliest convenience.</p>
 
       <p>Thank you and looking forward to hearing from you!</p>
 
-      <p>
-        Best regards,<br>
-        FlyAsia Team<br>
-        <a href="https://www.flyasia.co">www.flyasia.co</a>
+      <p>Cheers,</p>
+
+      <p style="margin:0">Ben LAM<br>
+      Editor<br>
+      FlyAsia</p>
+
+      <p style="margin:8px 0 4px 0;font-size:13px;color:#333">
+        <strong>Website:</strong> <a href="https://www.flyasia.co">https://www.flyasia.co</a><br>
+        <strong>Address:</strong> Summarize Limited, Unit 02, 6/F, Yen Sheng Centre, 64 Hoi Yuen Road, Kwun Tong, Kowloon, Hong Kong
+      </p>
+
+      <hr style="border:none;border-top:1px solid #ccc;margin:12px 0">
+
+      <p style="font-size:11px;color:#888;margin:0">
+        <strong>DISCLAIMER:</strong> This e-mail, including attachment(s), may contain PRIVILEGED AND CONFIDENTIAL information.
+        It is intended for the named recipient(s) only. If you are not an intended recipient, please notify us immediately
+        (by reply e-mail) and delete this e-mail from your system. Any unauthorized copying, disclosure, distribution of
+        the material or use of information contained in this e-mail is strictly prohibited.
       </p>
     </div>`;
 
@@ -248,9 +262,9 @@ function formatMonthLabel(date) {
 function formatDate(val) {
   if (!val) return '';
   if (val instanceof Date) {
-    return val.toLocaleString('en-HK', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Hong_Kong' });
+    return Utilities.formatDate(val, 'Asia/Hong_Kong', 'dd-MM-yyyy HH:mm:ss');
   }
-  return String(val).split(' ')[0]; // trim time from "DD-MM-YYYY HH:MM:SS" strings
+  return String(val); // keep raw string as-is, including time component
 }
 
 // ── One-time Trigger Setup ──────────────────────────────────────
