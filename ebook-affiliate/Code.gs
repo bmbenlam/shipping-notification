@@ -190,7 +190,7 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
       </p>
 
       <p>
-        Could you please provide a tax invoice made out to <strong>Summarize Limited</strong>
+        Could you please provide an invoice made out to <strong>Summarize Limited</strong>
         for the commission amount of <strong>HK$${commission.toFixed(2)}</strong>?
       </p>
 
