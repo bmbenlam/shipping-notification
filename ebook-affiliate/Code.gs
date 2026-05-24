@@ -1,7 +1,7 @@
 // ── Configuration ──────────────────────────────────────────────
 // Container-bound: use SpreadsheetApp.getActiveSpreadsheet() instead of openById().
 // SPREADSHEET_ID is kept here for reference/documentation only.
-const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE';
+const SPREADSHEET_ID = '1uN-f5C7_CGIGiqNcSmk_5oWieB8suJVjKcPt0E04VAA';
 const INTERNAL_EMAIL = 'flyasia.pacific@gmail.com';
 const COMMISSION_RATE = 0.4;
 const SETTLEMENT_THRESHOLD = 2000; // HKD
@@ -12,7 +12,9 @@ const SETTLEMENT_THRESHOLD = 2000; // HKD
 const VENDORS = [
   {
     name: 'HeaHotel',
-    email: 'HEAHOTEL_EMAIL_HERE',
+    greeting: 'Dear Eddie and Team,',
+    email: 'enjoyheahotel@gmail.com',
+    cc: 'eddietin2000@yahoo.com.hk',
     tabs: [
       { sheetName: 'eddie_asiamiles', statusCol: 4 },
       { sheetName: 'eddie_avios',     statusCol: 3 },
@@ -20,7 +22,9 @@ const VENDORS = [
   },
   {
     name: 'YolkInsight',
-    email: 'YOLKINSIGHT_EMAIL_HERE',
+    greeting: 'Dear Mr. Poon,',
+    email: 'yolkinsight@gmail.com',
+    cc: '',
     tabs: [
       { sheetName: 'yolk_asiamiles', statusCol: 4 },
       { sheetName: 'yolk_avios',     statusCol: 3 },
@@ -28,7 +32,9 @@ const VENDORS = [
   },
   {
     name: 'Edin',
-    email: 'EDIN_EMAIL_HERE',
+    greeting: 'Dear Edin,',
+    email: 'edintse@flywellltd.com',
+    cc: '',
     tabs: [
       { sheetName: 'edin_asiamiles', statusCol: 4 },
       { sheetName: 'edin_avios',     statusCol: 3 },
@@ -169,9 +175,12 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
           <td style="padding:8px;border:1px solid #ddd;color:#666;font-size:12px">${r.source}</td>
         </tr>`).join('');
 
+  const draftOptions = { htmlBody };
+  if (vendor.cc) draftOptions.cc = vendor.cc;
+
   const htmlBody = `
     <div style="font-family:Arial,sans-serif;max-width:700px">
-      <p>Dear ${vendor.name} Team,</p>
+      <p>${vendor.greeting}</p>
 
       <p>Hope you are well.</p>
 
@@ -222,8 +231,8 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
       </p>
     </div>`;
 
-  GmailApp.createDraft(vendor.email, subject, '', { htmlBody });
-  console.log(`Draft created for ${vendor.name} → ${vendor.email}`);
+  GmailApp.createDraft(vendor.email, subject, '', draftOptions);
+  console.log(`Draft created for ${vendor.name} → ${vendor.email}${vendor.cc ? ` (cc: ${vendor.cc})` : ''}`);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
