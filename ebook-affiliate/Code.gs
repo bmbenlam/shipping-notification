@@ -125,14 +125,17 @@ function sendInternalSummary(results, monthLabel, runDate) {
   const subject = `[Affiliate Settlement] ${monthLabel} Monthly Summary`;
 
   const rows = results.map(r => {
-    const badge = r.needsSettlement ? '🔴 NEEDS SETTLEMENT' : '🟢 Below threshold';
+    const badge = r.needsSettlement ? '[NEEDS SETTLEMENT]' : 'Below threshold';
+    const badgeStyle = r.needsSettlement
+      ? 'color:#b20000;font-weight:bold'
+      : 'color:#2e7d32';
     return `
       <tr>
         <td style="padding:10px;border:1px solid #ddd;font-weight:bold">${r.vendor.name}</td>
         <td style="padding:10px;border:1px solid #ddd">HK$${r.data.totalUnpaid.toFixed(2)}</td>
         <td style="padding:10px;border:1px solid #ddd">HK$${r.commission.toFixed(2)}</td>
         <td style="padding:10px;border:1px solid #ddd;font-size:13px">${r.data.unpaidRows.length} row(s)</td>
-        <td style="padding:10px;border:1px solid #ddd">${badge}</td>
+        <td style="padding:10px;border:1px solid #ddd;${badgeStyle}">${badge}</td>
       </tr>`;
   }).join('');
 
@@ -154,11 +157,11 @@ function sendInternalSummary(results, monthLabel, runDate) {
       </table>
       <p style="margin-top:20px;color:#666;font-size:13px">
         Settlement threshold: HK$${SETTLEMENT_THRESHOLD.toFixed(2)} commission.<br>
-        Gmail drafts have been created for all vendors marked 🔴.
+        Gmail drafts have been created for all vendors marked [NEEDS SETTLEMENT].
       </p>
     </div>`;
 
-  GmailApp.sendEmail(INTERNAL_EMAIL, subject, '', { htmlBody });
+  GmailApp.sendEmail(INTERNAL_EMAIL, subject, '', { htmlBody, from: 'info@flyasia.co' });
   console.log(`Internal summary sent to ${INTERNAL_EMAIL}`);
 }
 
@@ -174,9 +177,6 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
           <td style="padding:8px;border:1px solid #ddd">${r.coupon}</td>
           <td style="padding:8px;border:1px solid #ddd;color:#666;font-size:12px">${r.source}</td>
         </tr>`).join('');
-
-  const draftOptions = { htmlBody };
-  if (vendor.cc) draftOptions.cc = vendor.cc;
 
   const htmlBody = `
     <div style="font-family:Arial,sans-serif;max-width:700px">
@@ -230,6 +230,9 @@ function createSettlementDraft(vendor, data, commission, monthLabel) {
         <a href="https://www.flyasia.co">www.flyasia.co</a>
       </p>
     </div>`;
+
+  const draftOptions = { htmlBody, from: 'info@flyasia.co' };
+  if (vendor.cc) draftOptions.cc = vendor.cc;
 
   GmailApp.createDraft(vendor.email, subject, '', draftOptions);
   console.log(`Draft created for ${vendor.name} → ${vendor.email}${vendor.cc ? ` (cc: ${vendor.cc})` : ''}`);
