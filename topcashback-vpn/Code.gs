@@ -146,83 +146,115 @@ function updateSurfsharkBlogPost(rate, mgmRate) {
   // --- Deduplication check ---
   const lastUpdateStr = props.getProperty('SURFSHARK_LAST_UPDATE');
   const lastRate      = parseFloat(props.getProperty('SURFSHARK_LAST_RATE') || '0');
-  const lastPriceHKD  = props.getProperty('SURFSHARK_LAST_PRICE_HKD') || '';
 
+  // --- Fetch raw post content up front (needed to parse current prices) ---
+  const rawContent = fetchWPPostRaw();
+  if (!rawContent) return;
+
+  // --- Parse all three current prices from post ---
+  const currentPrices = parsePricesFromPost(rawContent);
+  console.log(`Current prices from post: 2yr=HK$${currentPrices.twoYear}, 1yr=HK$${currentPrices.oneYear}, 1mo=HK$${currentPrices.oneMonth}`);
+
+  // --- Try to scrape updated prices from Surfshark ---
+  const scrapedPrices = scrapeSurfsharkPrices();
+  const newPrices = {
+    twoYear:  (scrapedPrices && scrapedPrices.twoYear)  || currentPrices.twoYear,
+    oneYear:  (scrapedPrices && scrapedPrices.oneYear)  || currentPrices.oneYear,
+    oneMonth: (scrapedPrices && scrapedPrices.oneMonth) || currentPrices.oneMonth,
+  };
+  const pricesChanged = newPrices.twoYear  !== currentPrices.twoYear  ||
+                        newPrices.oneYear  !== currentPrices.oneYear  ||
+                        newPrices.oneMonth !== currentPrices.oneMonth;
+
+  console.log(`Scraped prices: 2yr=${scrapedPrices ? 'HK$' + scrapedPrices.twoYear : 'null'}, ` +
+    `1yr=${scrapedPrices ? 'HK$' + scrapedPrices.oneYear : 'null'}, ` +
+    `1mo=${scrapedPrices ? 'HK$' + scrapedPrices.oneMonth : 'null'}`);
+  console.log(`Price changed: ${pricesChanged}`);
+
+  // --- Deduplication: skip if same rate, no price change, and within cooldown ---
   if (lastUpdateStr) {
     const daysSince = (now - new Date(lastUpdateStr)) / (1000 * 60 * 60 * 24);
-    if (daysSince < BLOG_UPDATE_COOLDOWN_DAYS && rate === lastRate) {
-      console.log(`Blog update skipped: last updated ${daysSince.toFixed(1)} days ago at same rate (${rate}%)`);
+    if (daysSince < BLOG_UPDATE_COOLDOWN_DAYS && rate === lastRate && !pricesChanged) {
+      console.log(`Blog update skipped: last updated ${daysSince.toFixed(1)} days ago at same rate (${rate}%) and same prices`);
       return;
     }
   }
 
-  // --- Fetch current post ---
+  // --- Claude proofread (on rendered post for readability) ---
   const post = fetchWPPost();
-  if (!post) return;
-  let content = post.content.rendered;
-
-  // --- Parse current price from post ---
-  const priceMatch = content.match(/Surfshark Starter<\/td><td>HK\$(\d+)<\/td>/);
-  const currentPriceHKD = priceMatch ? priceMatch[1] : lastPriceHKD;
-
-  // --- Try to scrape updated price from Surfshark ---
-  const scrapedPrice = scrapeSurfsharkPrice();
-  const newPriceHKD = scrapedPrice || currentPriceHKD;
-  const priceChanged = newPriceHKD && newPriceHKD !== currentPriceHKD;
-
-  console.log(`Price: current=${currentPriceHKD}, scraped=${scrapedPrice}, using=${newPriceHKD}, changed=${priceChanged}`);
-
-  // --- Build updated content ---
-  content = updateIntroparagraph(content, rate, now);
-  content = updateCaptionDate(content, now);
-  if (priceChanged) {
-    content = updatePriceOccurrences(content, currentPriceHKD, newPriceHKD);
-  }
-
-  // --- Claude proofread ---
-  const sectionToCheck = extractKeySection(content);
-  const proofreadResult = proofreadWithClaude(sectionToCheck, newPriceHKD, rate);
+  const renderedContent = post ? post.content.rendered : rawContent;
+  const sectionToCheck = extractKeySection(renderedContent);
+  const proofreadResult = proofreadWithClaude(sectionToCheck, newPrices, rate);
   if (proofreadResult && proofreadResult !== '無問題') {
     console.warn(`Claude proofread flagged: ${proofreadResult}`);
-    sendProofreadAlert(proofreadResult, rate, newPriceHKD);
-    // Still proceed with the update — flag is informational
+    sendProofreadAlert(proofreadResult, rate, newPrices);
+    // Still proceed — flag is informational
   }
 
-  // --- Push to WordPress (raw content, not rendered) ---
-  const rawContent = fetchWPPostRaw();
-  if (!rawContent) return;
-  let rawUpdated = updateIntroparagraph(rawContent, rate, now);
-  rawUpdated = updateCaptionDate(rawUpdated, now);
-  if (priceChanged) rawUpdated = updatePriceOccurrences(rawUpdated, currentPriceHKD, newPriceHKD);
+  // --- Apply updates to raw Gutenberg content ---
+  let updated = updateIntroparagraph(rawContent, rate, now);
+  updated = updateCaptionDate(updated, now);
+  if (pricesChanged) updated = updatePriceOccurrences(updated, currentPrices, newPrices);
 
-  const success = pushWPPost(rawUpdated);
+  const success = pushWPPost(updated);
   if (!success) return;
 
   // --- Save state ---
   props.setProperty('SURFSHARK_LAST_UPDATE', now.toISOString());
   props.setProperty('SURFSHARK_LAST_RATE', String(rate));
-  props.setProperty('SURFSHARK_LAST_PRICE_HKD', newPriceHKD);
+  props.setProperty('SURFSHARK_PRICE_2Y',  newPrices.twoYear);
+  props.setProperty('SURFSHARK_PRICE_1Y',  newPrices.oneYear);
+  props.setProperty('SURFSHARK_PRICE_1M',  newPrices.oneMonth);
 
-  console.log(`Blog post updated. Price: HK$${newPriceHKD}, Rate: ${rate}%`);
-  sendBlogUpdateSummary(rate, newPriceHKD, priceChanged, proofreadResult);
+  console.log(`Blog post updated. Prices: 2yr=HK$${newPrices.twoYear}, 1yr=HK$${newPrices.oneYear}, 1mo=HK$${newPrices.oneMonth}, Rate: ${rate}%`);
+  sendBlogUpdateSummary(rate, newPrices, pricesChanged, proofreadResult);
 }
 
-// Attempts to scrape the HK$ price of Surfshark Starter 2-year plan
-function scrapeSurfsharkPrice() {
+// Parses all three Surfshark Starter prices from the WP post raw content
+function parsePricesFromPost(content) {
+  const match = content.match(/Surfshark Starter<\/td><td>HK\$(\d+)<\/td><td>HK\$(\d+)<\/td><td>HK\$(\d+)<\/td>/);
+  if (match) {
+    return { twoYear: match[1], oneYear: match[2], oneMonth: match[3] };
+  }
+  // Fallback to stored values if post structure changed
+  const props = PropertiesService.getScriptProperties();
+  return {
+    twoYear:  props.getProperty('SURFSHARK_PRICE_2Y')  || '',
+    oneYear:  props.getProperty('SURFSHARK_PRICE_1Y')  || '',
+    oneMonth: props.getProperty('SURFSHARK_PRICE_1M')  || '',
+  };
+}
+
+// Attempts to scrape all three HK$ prices for Surfshark Starter (2yr, 1yr, 1mo)
+// Returns { twoYear, oneYear, oneMonth } or null if scraping fails / page is JS-rendered
+function scrapeSurfsharkPrices() {
   try {
     const html = fetchUrl('https://surfshark.com/pricing');
     if (!html) return null;
 
-    // Try to find HK$ price near "Starter"
-    const hkMatch = html.match(/HK\$\s*(\d+(?:\.\d+)?)/i);
-    if (hkMatch) return hkMatch[1];
+    // Collect all HK$ prices from the page
+    const hkMatches = [...html.matchAll(/HK\$\s*(\d+(?:\.\d+)?)/gi)];
+    if (hkMatches.length >= 3) {
+      // Deduplicate and sort ascending; Surfshark totals: 2-yr < 1-yr < 1-mo
+      const unique = [...new Set(hkMatches.map(m => String(Math.round(parseFloat(m[1])))))];
+      unique.sort((a, b) => parseInt(a) - parseInt(b));
+      if (unique.length >= 3) {
+        console.log(`Scraped HK$ prices: ${unique.join(', ')}`);
+        return { twoYear: unique[0], oneYear: unique[1], oneMonth: unique[2] };
+      }
+    }
 
-    // Fallback: find USD price and convert
+    // Fallback: one HK$ hit → treat as 2-year only
+    if (hkMatches.length === 1) {
+      return { twoYear: String(Math.round(parseFloat(hkMatches[0][1]))), oneYear: null, oneMonth: null };
+    }
+
+    // Last resort: USD price → convert 2-year only
     const usdMatch = html.match(/\$\s*(\d+\.\d{2})\s*(?:USD)?/);
     if (usdMatch) {
-      const hkd = Math.round(parseFloat(usdMatch[1]) * USD_TO_HKD);
-      console.log(`Converted USD price ${usdMatch[1]} → HK$${hkd}`);
-      return String(hkd);
+      const hkd = String(Math.round(parseFloat(usdMatch[1]) * USD_TO_HKD));
+      console.log(`Converted USD ${usdMatch[1]} → HK$${hkd} (2-year only)`);
+      return { twoYear: hkd, oneYear: null, oneMonth: null };
     }
   } catch (e) {
     console.warn(`Surfshark price scrape failed: ${e.message}`);
@@ -252,20 +284,43 @@ function updateCaptionDate(content, date) {
   );
 }
 
-// Replaces all Surfshark price occurrences when price changes
-function updatePriceOccurrences(content, oldPrice, newPrice) {
-  const oldHKD  = `HK$${oldPrice}`;
-  const newHKD  = `HK$${newPrice}`;
+// Replaces Surfshark Starter prices in all three locations when prices change.
+// oldPrices / newPrices: { twoYear, oneYear, oneMonth }
+function updatePriceOccurrences(content, oldPrices, newPrices) {
+  const { twoYear: o2, oneYear: o1, oneMonth: om } = oldPrices;
+  const { twoYear: n2, oneYear: n1, oneMonth: nm } = newPrices;
 
-  // Replace positive price references
-  content = content.split(oldHKD).join(newHKD);
+  // Only replace rows where we have all three new prices
+  if (n2 && n1 && nm) {
+    // Price comparison table — Surfshark Starter row
+    content = content.replace(
+      new RegExp(`(Surfshark Starter<\\/td><td>)HK\\$${o2}(<\\/td><td>)HK\\$${o1}(<\\/td><td>)HK\\$${om}(<\\/td>)`),
+      `$1HK$${n2}$2HK$${n1}$3HK$${nm}$4`
+    );
+    // Cashback calc table — 官網價格 row (positive prices)
+    content = content.replace(
+      new RegExp(`(官網價格<\\/td><td>)HK\\$${o2}(<\\/td><td>)HK\\$${o1}(<\\/td><td>)HK\\$${om}(<\\/td>)`),
+      `$1HK$${n2}$2HK$${n1}$3HK$${nm}$4`
+    );
+    // Cashback calc table — TopCashback rebate row (negative prices)
+    content = content.replace(
+      new RegExp(`-HK\\$${o2}(<\\/td><td>)-HK\\$${o1}(<\\/td><td>)-HK\\$${om}(<\\/td>)`),
+      `-HK$${n2}$1-HK$${n1}$2-HK$${nm}$3`
+    );
+  } else if (n2 && n2 !== o2) {
+    // Partial scrape (2-year only) — replace globally, best effort
+    content = content.split(`HK$${o2}`).join(`HK$${n2}`);
+    content = content.split(`-HK$${o2}`).join(`-HK$${n2}`);
+  }
 
-  // Update the inline calculation: HK$XXX ÷ 7.85 = US$YY.Y
-  const newUSD  = (parseInt(newPrice) / USD_TO_HKD).toFixed(1);
-  content = content.replace(
-    /HK\$\d+ ÷ 7\.85 = US\$[\d.]+/,
-    `${newHKD} ÷ ${USD_TO_HKD} = US$${newUSD}`
-  );
+  // Update the inline USD calculation paragraph (always uses 2-year price)
+  if (n2 && n2 !== o2) {
+    const newUSD = (parseInt(n2) / USD_TO_HKD).toFixed(1);
+    content = content.replace(
+      /HK\$\d+ ÷ 7\.85 = US\$[\d.]+/,
+      `HK$${n2} ÷ ${USD_TO_HKD} = US$${newUSD}`
+    );
+  }
 
   return content;
 }
@@ -348,7 +403,8 @@ function extractKeySection(content) {
   ].join('\n\n');
 }
 
-function proofreadWithClaude(section, priceHKD, rate) {
+// prices: { twoYear, oneYear, oneMonth }
+function proofreadWithClaude(section, prices, rate) {
   const props = PropertiesService.getScriptProperties();
   const apiKey = props.getProperty('ANTHROPIC_API_KEY');
   if (!apiKey) {
@@ -356,9 +412,10 @@ function proofreadWithClaude(section, priceHKD, rate) {
     return null;
   }
 
+  const priceDesc = `2-year = HK$${prices.twoYear}, 1-year = HK$${prices.oneYear}, 1-month = HK$${prices.oneMonth}`;
   const prompt = `You are proofreading a Traditional Chinese blog post section about Surfshark VPN. ` +
-    `The expected values are: 2-year Starter plan price = HK$${priceHKD}, Topcashback cashback rate = ${rate}%. ` +
-    `Check the following text for any numerical contradictions or inconsistencies. ` +
+    `The expected values are: Surfshark Starter plan prices (${priceDesc}), Topcashback cashback rate = ${rate}%. ` +
+    `Check the following text for any numerical contradictions or inconsistencies across all plan prices and the cashback rate. ` +
     `Reply with '無問題' if everything is consistent, or briefly describe what is inconsistent.\n\n${section}`;
 
   try {
@@ -398,14 +455,17 @@ function sendAlert(vpnName, vpnRate, mgmRate, dateLabel) {
   console.log(`Alert sent: ${subject}`);
 }
 
-function sendBlogUpdateSummary(rate, priceHKD, priceChanged, proofreadNote) {
-  const subject = `[SurfShark Blog] Post updated — ${rate}% promo | HK$${priceHKD}`;
+// prices: { twoYear, oneYear, oneMonth }
+function sendBlogUpdateSummary(rate, prices, pricesChanged, proofreadNote) {
+  const subject = `[SurfShark Blog] Post updated — ${rate}% promo | HK$${prices.twoYear} / HK$${prices.oneYear} / HK$${prices.oneMonth}`;
   const body = [
     `The Surfshark VPN blog post (Post ID ${WP_POST_ID}) has been automatically updated.`,
     ``,
     `Cashback rate:  ${rate}%`,
-    `2-year price:   HK$${priceHKD}`,
-    `Price changed:  ${priceChanged ? 'YES — all price references updated' : 'No change'}`,
+    `2-year price:   HK$${prices.twoYear}`,
+    `1-year price:   HK$${prices.oneYear}`,
+    `1-month price:  HK$${prices.oneMonth}`,
+    `Prices changed: ${pricesChanged ? 'YES — all price rows updated' : 'No change'}`,
     `Claude check:   ${proofreadNote || 'Skipped (no API key)'}`,
     ``,
     `Review the post: ${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`,
@@ -413,11 +473,12 @@ function sendBlogUpdateSummary(rate, priceHKD, priceChanged, proofreadNote) {
   GmailApp.sendEmail(ALERT_EMAIL, subject, body, { from: FROM_EMAIL });
 }
 
-function sendProofreadAlert(note, rate, priceHKD) {
+// prices: { twoYear, oneYear, oneMonth }
+function sendProofreadAlert(note, rate, prices) {
   GmailApp.sendEmail(
     ALERT_EMAIL,
     `[SurfShark Blog] ⚠ Proofread flag — please review`,
-    `Claude flagged a potential inconsistency in the updated post:\n\n${note}\n\nRate: ${rate}%, Price: HK$${priceHKD}\n\nPost: ${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`,
+    `Claude flagged a potential inconsistency in the updated post:\n\n${note}\n\nRate: ${rate}%\n2-yr: HK$${prices.twoYear}, 1-yr: HK$${prices.oneYear}, 1-mo: HK$${prices.oneMonth}\n\nPost: ${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`,
     { from: FROM_EMAIL }
   );
 }
@@ -448,9 +509,10 @@ function formatChineseDate(date) {
 // Run setupCredentials() once from the editor, then delete it.
 // function setupCredentials() {
 //   const props = PropertiesService.getScriptProperties();
-//   props.setProperty('WP_USERNAME',     'ai@flyasia.co');
-//   props.setProperty('WP_APP_PASSWORD', 'Yk4d f5hH f1AF qtTd O49e ftYX');
+//   props.setProperty('WP_USERNAME',       'ai@flyasia.co');
+//   props.setProperty('WP_APP_PASSWORD',   'Yk4d f5hH f1AF qtTd O49e ftYX');
 //   props.setProperty('ANTHROPIC_API_KEY', 'sk-ant-YOUR_KEY_HERE');
+//   // Prices are auto-populated on first run from the live post content
 // }
 
 // Run setupTriggers() once to create both daily triggers, then delete it.
