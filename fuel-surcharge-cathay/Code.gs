@@ -21,6 +21,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('YQ Monitor')
     .addItem('Run Check Now',            'triggerManualRun')
+    .addItem('Force Full Run (test)',    'forceFullRun')
     .addItem('Test Scrape Only',         'testScrapeOnly')
     .addItem('Setup Charts (first run)', 'setupCharts')
     .addItem('Insert Charts into Post',  'insertChartsIntoPost')
@@ -28,6 +29,20 @@ function onOpen() {
 }
 
 function triggerManualRun() { runFuelSurchargeMonitor(); }
+
+// Bypasses the frequency gate and resets stored rates to 0 so the current
+// scraped values always appear as a change. Use this to test the full flow
+// (sheet logging + pending revision + approval email) without waiting for
+// the gate or a real rate change.
+function forceFullRun() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty('YQ_LAST_CHECK');
+  props.deleteProperty('YQ_LAST_SHORT');
+  props.deleteProperty('YQ_LAST_MEDIUM');
+  props.deleteProperty('YQ_LAST_LONG');
+  console.log('Gate and stored rates cleared — running full flow now...');
+  runFuelSurchargeMonitor();
+}
 
 // Fetches the Cathay page and logs extracted rates — no sheet writes, no emails, no WP update.
 // Use this to verify the scraper works without triggering the full flow or being blocked by the gate.
