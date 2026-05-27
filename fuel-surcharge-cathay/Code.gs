@@ -20,11 +20,13 @@ const HIGH_FREQ_DAYS = new Set([28, 29, 30, 31, 1, 2, 14, 15, 16]);
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('YQ Monitor')
-    .addItem('Run Check Now',            'triggerManualRun')
-    .addItem('Force Full Run (test)',    'forceFullRun')
-    .addItem('Test Scrape Only',         'testScrapeOnly')
-    .addItem('Setup Charts (first run)', 'setupCharts')
-    .addItem('Insert Charts into Post',  'insertChartsIntoPost')
+    .addItem('Run Check Now',              'triggerManualRun')
+    .addItem('Force Full Run (test)',      'forceFullRun')
+    .addItem('Test Scrape Only',           'testScrapeOnly')
+    .addItem('Publish Staged Update',      'publishStagedUpdate')
+    .addSeparator()
+    .addItem('Setup Charts (first run)',   'setupCharts')
+    .addItem('Insert Charts into Post',    'insertChartsIntoPost')
     .addToUi();
 }
 
@@ -116,14 +118,14 @@ function runFuelSurchargeMonitor() {
   const prev = { short: prevShort, medium: prevMedium, long: prevLong };
 
   // Build the updated blog post content, proofread it, and save as pending revision
-  const { revisionId, proofResult } = prepareBlogRevision(current, prev, now);
+  const { proofResult } = prepareBlogRevision(current, prev, now);
 
   props.setProperty('YQ_LAST_SHORT',  String(current.short));
   props.setProperty('YQ_LAST_MEDIUM', String(current.medium));
   props.setProperty('YQ_LAST_LONG',   String(current.long));
   props.setProperty('YQ_LAST_CHANGE', now.toISOString());
 
-  sendApprovalRequest(prev, current, now, proofResult, revisionId);
+  sendApprovalRequest(prev, current, now, proofResult);
   console.log('Monitor run complete');
 }
 
@@ -245,14 +247,18 @@ function lastHKDInRow(sectionHtml) {
   return vals.length ? parseInt(vals[vals.length - 1][1]) : null;
 }
 
-// ── Blog Post Revision (Approval Flow) ─────────────────────────
-// Builds the updated content, proofreads with Claude, and saves as a
-// Revisionary pending revision — the live post is NOT touched until
-// an editor approves it in the WordPress admin.
+// ── Blog Post Staging (Approval Flow) ──────────────────────────
+// The updated content is stored in a hidden sheet tab (_pending) rather than
+// pushed to WordPress directly. The live post is never touched automatically.
+// After reviewing the approval email, an editor clicks:
+//   YQ Monitor → Publish Staged Update
+// which reads the staged content from the sheet and publishes it.
+
+const PENDING_SHEET_NAME = '_pending';
 
 function prepareBlogRevision(current, prev, date) {
   const rawContent = fetchWPPostRaw();
-  if (!rawContent) return { revisionId: null, proofResult: '（無法取得文章內容）' };
+  if (!rawContent) return { proofResult: '（無法取得文章內容）' };
 
   let updated = updateDateLine(rawContent, date);
   updated = updateCurrentRatesTable(updated, current, prev, date);
@@ -261,34 +267,67 @@ function prepareBlogRevision(current, prev, date) {
   const proofResult = proofreadWithClaude(current, updated);
   console.log(`Proofread result: ${proofResult}`);
 
-  const revisionId = savePendingRevision(updated);
-  return { revisionId, proofResult };
+  stagePendingUpdate(updated, current, prev, date);
+  return { proofResult };
 }
 
-// POSTs to Revisionary as a pending revision. The live post is unchanged
-// until an editor clicks Approve in WordPress admin.
-// Returns the revision ID on success, or null on failure.
-function savePendingRevision(rawContent) {
-  try {
-    const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}`, {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { Authorization: wpAuthHeader() },
-      payload: JSON.stringify({ content: rawContent, status: 'pending-revision' }),
-      muteHttpExceptions: true,
-    });
-    const code = res.getResponseCode();
-    if (code < 200 || code >= 300) {
-      console.error(`savePendingRevision failed: HTTP ${code} — ${res.getContentText().substring(0, 300)}`);
-      return null;
-    }
-    const data = JSON.parse(res.getContentText());
-    const revisionId = data.id || data.parent || null;
-    console.log(`Pending revision saved (HTTP ${code}, revision id: ${revisionId})`);
-    return revisionId;
-  } catch (e) {
-    console.error(`savePendingRevision error: ${e.message}`);
-    return null;
+// Saves the proposed updated content to a hidden sheet tab so it can be
+// reviewed and published manually via the menu — live post is untouched.
+function stagePendingUpdate(updatedContent, current, prev, date) {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
+  let sheet   = ss.getSheetByName(PENDING_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(PENDING_SHEET_NAME);
+    sheet.hideSheet();
+  }
+  sheet.clearContents();
+  const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd HH:mm:ss');
+  sheet.getRange('A1').setValue(dateStr);
+  sheet.getRange('A2').setValue(JSON.stringify({ current, prev }));
+  // Content may exceed a single cell limit — split into 40,000-char chunks across rows A3+
+  const chunkSize = 40000;
+  for (let i = 0; i < updatedContent.length; i += chunkSize) {
+    sheet.getRange(3 + Math.floor(i / chunkSize), 1).setValue(updatedContent.slice(i, i + chunkSize));
+  }
+  console.log(`Staged update saved to "${PENDING_SHEET_NAME}" sheet (${updatedContent.length} chars)`);
+}
+
+// Called from the menu: reads the staged content and publishes it to WordPress.
+function publishStagedUpdate() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(PENDING_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 3) {
+    SpreadsheetApp.getUi().alert('No staged update found. Run the monitor first to stage a pending update.');
+    return;
+  }
+
+  const dateStr = sheet.getRange('A1').getValue();
+  const meta    = JSON.parse(sheet.getRange('A2').getValue() || '{}');
+
+  // Reassemble content from chunked rows
+  let updatedContent = '';
+  for (let row = 3; row <= sheet.getLastRow(); row++) {
+    updatedContent += sheet.getRange(row, 1).getValue();
+  }
+
+  const ui = SpreadsheetApp.getUi();
+  const confirm = ui.alert(
+    'Publish staged update?',
+    `This will publish the staged update from ${dateStr} to the live blog post.\n\nRates: short=${meta.current && meta.current.short}, medium=${meta.current && meta.current.medium}, long=${meta.current && meta.current.long}\n\nProceed?`,
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) {
+    console.log('Publish cancelled by user');
+    return;
+  }
+
+  if (pushWPPost(updatedContent)) {
+    sheet.clearContents();
+    sheet.hideSheet();
+    ui.alert('Published successfully. The live post has been updated.');
+    console.log('Staged update published and _pending sheet cleared');
+  } else {
+    ui.alert('Publish failed — check the Executions log for details.');
   }
 }
 
@@ -575,7 +614,7 @@ function logRateChange(date, short, medium, long) {
 
 // Sends an approval request to both info@ and heidi@, with rate changes,
 // proofread result, and a direct link to review and approve the pending revision.
-function sendApprovalRequest(prev, current, date, proofResult, revisionId) {
+function sendApprovalRequest(prev, current, date, proofResult) {
   const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd');
   const subject = `[CX YQ] 待審批修訂 | 短途 ${formatHKD(current.short)} | 中途 ${formatHKD(current.medium)} | 長途 ${formatHKD(current.long)} | ${dateStr}`;
 
@@ -583,12 +622,11 @@ function sendApprovalRequest(prev, current, date, proofResult, revisionId) {
     ? `⚠ Claude 校對發現問題：\n  ${proofResult}\n\n  請在批准前仔細核對文章內容。`
     : `✓ Claude 校對：無問題`;
 
-  const reviewUrl  = `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
-  const revisionsUrl = `${WP_SITE}/wp-admin/revision.php?revision=${revisionId || ''}`;
+  const reviewUrl = `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
 
   const body = [
-    '國泰燃油附加費有變更，已準備好待審批的文章修訂。',
-    '請在 WordPress 後台審閱並批准後發布。',
+    '國泰燃油附加費有變更，文章更新已備妥待審批。',
+    '請在 Google Sheet 的 YQ Monitor 選單點擊「Publish Staged Update」發布。',
     '',
     '── 費率變更 ──',
     `短途 (Short Haul):   ${formatHKD(prev.short)}  →  ${formatHKD(current.short)}  ${diffText(prev.short, current.short)}`,
@@ -598,13 +636,12 @@ function sendApprovalRequest(prev, current, date, proofResult, revisionId) {
     '── 自動校對結果 ──',
     proofLine,
     '',
-    '── 審批連結 ──',
-    revisionId
-      ? `修訂記錄: ${revisionsUrl}`
-      : `文章編輯: ${reviewUrl}`,
-    `文章後台: ${reviewUrl}`,
+    '── 發布步驟 ──',
+    '1. 檢視現時文章: ' + reviewUrl,
+    '2. 確認費率及校對結果無誤',
+    '3. 開啟 Google Sheet → YQ Monitor 選單 → Publish Staged Update',
     '',
-    '── 審批後請確認 ──',
+    '── 發布後請確認 ──',
     '  - 現行收費表數值正確',
     '  - 歷史收費表已新增最新一行',
     '  - 正文中的示例金額是否需要手動更新（如 HK$339 x 2 = HK$678）',
