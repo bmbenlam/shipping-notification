@@ -96,14 +96,21 @@ function runFuelSurchargeMonitor() {
 
 function fetchUrl(url) {
   try {
+    console.log(`Fetching: ${url}`);
+    const t0 = Date.now();
     const res = UrlFetchApp.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-HK,zh;q=0.9,en;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-HK,zh-TW;q=0.9,zh;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Referer': 'https://www.cathaypacific.com/cx/zh_HK/latest-news.html',
       },
+      followRedirects: true,
       muteHttpExceptions: true,
     });
+    console.log(`Fetch completed in ${((Date.now() - t0) / 1000).toFixed(1)}s — HTTP ${res.getResponseCode()}`);
     if (res.getResponseCode() !== 200) {
       console.error(`HTTP ${res.getResponseCode()} for ${url}`);
       return null;
@@ -116,33 +123,63 @@ function fetchUrl(url) {
 }
 
 // Returns { short, medium, long } in HKD integers, or null.
-// Cathay's page lists short-haul (短途), medium-haul (中途), long-haul (長途).
-// If null is returned after a page change, inspect the source and update patterns below.
+//
+// Page structure (as of 2026-05):
+//   Values are formatted "NNN 港幣" — NOT "HK$NNN".
+//   Sections are split by two unique anchor strings:
+//     • 南亞次大陸  → marks start of medium-haul (South Asia subcontinent) section
+//     • 上表未提及的航班 → marks start of short-haul (all other routes) section
+//   Long haul is the section before 南亞次大陸.
+//   Each section's table has a "香港" row; we take the last 港幣 value in that row
+//   (= the most recently-effective column).
+//   Desktop and mobile views are both in the HTML; 香港<\/td> only matches desktop <td> cells.
+//
+// If extractYQRates returns null, check the Executions log for detail, inspect the page source,
+// and update the anchor strings or lastHKDInRow() regex accordingly.
 function extractYQRates(html) {
-  // Pattern A: three labeled rows for 短途, 中途, 長途
-  const shortMatch  = html.match(/短途[\s\S]{0,400}?(?:HK\$|HKD\s*)(\d[\d,]*)/);
-  const mediumMatch = html.match(/中途[\s\S]{0,400}?(?:HK\$|HKD\s*)(\d[\d,]*)/);
-  const longMatch   = html.match(/長途[\s\S]{0,400}?(?:HK\$|HKD\s*)(\d[\d,]*)/);
+  const mediumIdx = html.indexOf('南亞次大陸');
+  const shortIdx  = html.indexOf('上表未提及的航班');
 
-  if (shortMatch && mediumMatch && longMatch) {
-    return {
-      short:  parseInt(shortMatch[1].replace(/,/g, '')),
-      medium: parseInt(mediumMatch[1].replace(/,/g, '')),
-      long:   parseInt(longMatch[1].replace(/,/g, '')),
-    };
+  if (mediumIdx > 0 && shortIdx > mediumIdx) {
+    const longSection   = html.substring(0, mediumIdx);
+    const mediumSection = html.substring(mediumIdx, shortIdx);
+    // Limit short section to ~5000 chars — enough for the first table, avoids picking
+    // up the later China/Japan/Korea/Philippines sub-tables in the same section.
+    const shortSection  = html.substring(shortIdx, shortIdx + 5000);
+
+    const long   = lastHKDInRow(longSection);
+    const medium = lastHKDInRow(mediumSection);
+    const short  = lastHKDInRow(shortSection);
+
+    if (long !== null && medium !== null && short !== null) {
+      console.log(`Pattern A: short=${short}, medium=${medium}, long=${long}`);
+      return { short, medium, long };
+    }
+    console.warn(`Pattern A partial: short=${short}, medium=${medium}, long=${long}. Trying fallback.`);
+  } else {
+    console.warn(`Anchor strings not found (mediumIdx=${mediumIdx}, shortIdx=${shortIdx}). Trying fallback.`);
   }
 
-  // Pattern B: look for short+medium (different amounts) + long (highest)
-  const allHKD = [...html.matchAll(/(?:HK\$|HKD\s*)(\d[\d,]*)/g)]
-    .map(m => parseInt(m[1].replace(/,/g, '')))
-    .filter(n => n >= 50 && n <= 5000);
+  // Fallback: collect all "NNN 港幣" values in the plausible YQ range, pick lowest/mid/highest.
+  const allHKD = [...html.matchAll(/(\d{3,4}) 港幣/g)]
+    .map(m => parseInt(m[1]))
+    .filter(n => n >= 100 && n <= 5000);
   const unique = [...new Set(allHKD)].sort((a, b) => a - b);
   if (unique.length >= 3) {
-    console.warn(`extractYQRates: fallback pattern B used — values: ${unique.join(', ')}. Verify correctness.`);
+    console.warn(`Fallback used — all 港幣 values in range: ${unique.join(', ')}. Verify correctness.`);
     return { short: unique[0], medium: unique[1], long: unique[unique.length - 1] };
   }
 
   return null;
+}
+
+// Within a section of HTML, finds the first <td>香港</td> table row and returns
+// the LAST "NNN 港幣" value in that row (= current/latest effective-date column).
+function lastHKDInRow(sectionHtml) {
+  const rowMatch = sectionHtml.match(/香港<\/td>([\s\S]{0,500}?)<\/tr>/);
+  if (!rowMatch) return null;
+  const vals = [...rowMatch[1].matchAll(/(\d{3,4}) 港幣/g)];
+  return vals.length ? parseInt(vals[vals.length - 1][1]) : null;
 }
 
 // ── Blog Post Revision (Approval Flow) ─────────────────────────

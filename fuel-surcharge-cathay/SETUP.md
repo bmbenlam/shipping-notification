@@ -195,9 +195,22 @@ When a rate change is detected, the script does **not** publish immediately. Ins
 
 ## Scraper Maintenance
 
-If rate extractions start returning `null` (error emails arrive but no logging), Cathay Pacific may have changed their page HTML. Check the Executions log for `fallback pattern B used` warnings.
+The script extracts values formatted as `NNN 港幣` (e.g. `339 港幣`) from the Hong Kong rows in the desktop table view. It splits the page into three sections using two anchor strings:
 
-To fix: inspect the page source at `cathaypacific.com/cx/zh_HK/.../fuel-surcharge-updates.html` and update the regex in `extractYQRates()` in `Code.gs`.
+| Anchor | Section |
+|---|---|
+| `南亞次大陸` | Start of medium-haul (South Asia subcontinent) section |
+| `上表未提及的航班` | Start of short-haul (all other routes) section |
+| Before `南亞次大陸` | Long-haul section |
+
+If rate extractions start returning `null`, check the Executions log for `Anchor strings not found` or `Fallback used` warnings.
+
+To fix: inspect the page source and check:
+1. Are the anchor strings still present? → update `mediumIdx`/`shortIdx` in `extractYQRates()`
+2. Is the value format still `NNN 港幣`? → update the regex in `lastHKDInRow()`
+3. Is the 香港 row structure still `<td>香港</td>`? → update the row regex in `lastHKDInRow()`
+
+If the fetch itself is timing out (script hangs for ~60s with no output), Cathay's server may be blocking the request — check the `Accept-Language` and `User-Agent` headers in `fetchUrl()`.
 
 ---
 
