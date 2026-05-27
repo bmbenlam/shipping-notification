@@ -6,7 +6,7 @@ const ALERT_EMAIL  = 'info@flyasia.co';
 const HEIDI_EMAIL  = 'heidi@flyasia.co';
 const FROM_EMAIL   = 'info@flyasia.co';
 const WP_SITE      = 'https://www.flyasia.co';
-const WP_POST_ID   = 18512;
+const WP_POST_ID   = 170448;
 
 // Cathay Pacific fuel surcharge page (Chinese)
 const CATHAY_YQ_URL = 'https://www.cathaypacific.com/cx/zh_HK/latest-news/other-news/fuel-surcharge-updates.html';
