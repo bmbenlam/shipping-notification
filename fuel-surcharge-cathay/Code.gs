@@ -24,6 +24,7 @@ function onOpen() {
     .addItem('Force Full Run (test)',      'forceFullRun')
     .addItem('Test Scrape Only',           'testScrapeOnly')
     .addSeparator()
+    .addItem('Fix Sheet Dates (one-time)', 'fixSheetDates')
     .addItem('Setup Charts (first run)',   'setupCharts')
     .addItem('Insert Charts into Post',    'insertChartsIntoPost')
     .addToUi();
@@ -623,8 +624,32 @@ function logRateChange(date, short, medium, long) {
   const sheet = ss.getSheetByName(DATA_SHEET_NAME);
   if (!sheet) { console.error(`Sheet "${DATA_SHEET_NAME}" not found`); return; }
   const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd');
-  sheet.appendRow([dateStr, short, medium, long]);
+  // Write the Date object (not a string) so the chart X-axis is proportional time
+  sheet.appendRow([date, short, medium, long]);
+  const lastRow = sheet.getLastRow();
+  sheet.getRange(lastRow, 1).setNumberFormat('yyyy-MM-dd');
   console.log(`Logged: ${dateStr} | short=${short} | medium=${medium} | long=${long}`);
+}
+
+// Converts any text-string dates in column A to proper Date values.
+// Run once after importing historical CSV data so chart X-axis is time-proportional.
+function fixSheetDates() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(DATA_SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  let fixed = 0;
+  for (let row = 2; row <= lastRow; row++) {
+    const cell = sheet.getRange(row, 1);
+    const val  = cell.getValue();
+    if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val)) {
+      const [y, m, d] = val.split('-').map(Number);
+      cell.setValue(new Date(y, m - 1, d));
+      cell.setNumberFormat('yyyy-MM-dd');
+      fixed++;
+    }
+  }
+  console.log(`Fixed ${fixed} date cells (${lastRow - 1} rows total). Re-run setupCharts to refresh.`);
+  SpreadsheetApp.getUi().alert(`Fixed ${fixed} date cells. Now run Setup Charts (first run) from the menu to refresh the charts.`);
 }
 
 // ── Notification Emails ─────────────────────────────────────────
