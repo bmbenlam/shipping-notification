@@ -256,16 +256,18 @@ function lastHKDInRow(sectionHtml) {
 // Revision" → review in the editor → click "Update".
 
 function prepareBlogRevision(current, prev, date) {
-  const rawContent = fetchWPPostRaw();
-  if (!rawContent) {
+  const post = fetchWPPostRaw();
+  if (!post) {
     console.error('WP post fetch returned null — check WP_USERNAME / WP_APP_PASSWORD');
     return { proofResult: '（無法取得文章內容）', revisionUrl: null };
   }
-  if (rawContent.length < 500) {
-    console.error(`WP post content is only ${rawContent.length} chars — post appears empty. ` +
+  const { content: rawContent, title } = post;
+  if (!rawContent || rawContent.length < 500) {
+    console.error(`WP post content is only ${rawContent ? rawContent.length : 0} chars — post appears empty. ` +
       'Paste the full template content into post 170448 before running the monitor.');
     return { proofResult: '（文章內容過短，請先貼上完整模板）', revisionUrl: null };
   }
+  console.log(`Fetched post: "${title}" (${rawContent.length} chars)`);
 
   let updated = updateDateLine(rawContent, date);
   updated = updateCurrentRatesTable(updated, current, prev, date);
@@ -274,7 +276,7 @@ function prepareBlogRevision(current, prev, date) {
   const proofResult = proofreadWithClaude(current, updated);
   console.log(`Proofread result: ${proofResult}`);
 
-  const revisionId  = saveWPAutosave(updated);
+  const revisionId  = saveWPAutosave(updated, title);
   const revisionUrl = revisionId
     ? `${WP_SITE}/wp-admin/revision.php?revision=${revisionId}`
     : `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
@@ -285,13 +287,15 @@ function prepareBlogRevision(current, prev, date) {
 // Saves content as a WordPress autosave revision.
 // The live post is untouched; the revision appears in WP Admin → Revisions.
 // Returns the revision ID on success, null on failure.
-function saveWPAutosave(rawContent) {
+function saveWPAutosave(rawContent, title) {
   try {
+    const payload = { content: rawContent };
+    if (title) payload.title = title;
     const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}/autosaves`, {
       method: 'post',
       contentType: 'application/json',
       headers: { Authorization: wpAuthHeader() },
-      payload: JSON.stringify({ content: rawContent }),
+      payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
     if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) {
@@ -344,17 +348,20 @@ function updateCurrentRatesTable(content, current, prev, date) {
 
 // Matches the current-rates table row for 短途/中途/長途 and replaces:
 //   rate cell, effective-date cell, comparison cell.
+// Uses a function replacement (not a string) to avoid $ being misread as
+// a backreference — formatHKD() returns strings like "HK$339" / "HK$1,362"
+// whose $ would corrupt the output if used in a string replacement.
 function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
   const diff = newRate - prevRate;
   const compareText = diff === 0 ? '—'
     : (diff > 0 ? '▲ ' : '▼ ') + formatHKD(Math.abs(diff));
+  const newRateFmt = formatHKD(newRate);
 
   // Group 1: <strong>label</strong><br>destinations</td><td>
-  // Replaced: HK$old_rate
-  // Group 2: </td><td>
-  // [^<]+: old effective date including 起 (consumed — not a group)
-  // Group 3: </td><td>   (起? matches empty since 起 consumed by [^<]+)
-  // [^<]*: old comparison text
+  // Group 2: </td><td>  (after old rate)
+  // [^<]+:   old effective date + 起  (consumed, not captured)
+  // Group 3: </td><td>  (起? matches empty since 起 was consumed)
+  // [^<]*:   old comparison text
   // Group 4: </td>
   return content.replace(
     new RegExp(
@@ -363,7 +370,7 @@ function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
       `(<\/td>\\s*<td>)[^<]+(起?<\/td>\\s*<td>)` +
       `[^<]*(<\/td>)`
     ),
-    `$1${formatHKD(newRate)}$2${effectiveDate}$3${compareText}$4`
+    (_, g1, g2, g3, g4) => `${g1}${newRateFmt}${g2}${effectiveDate}${g3}${compareText}${g4}`
   );
 }
 
@@ -525,10 +532,10 @@ function insertChartsIntoPost() {
     `<!-- wp:html -->\n<iframe title="${title}" width="100%" height="400" seamless frameborder="0" scrolling="no" ` +
     `src="https://docs.google.com/spreadsheets/d/${sheetId}/pubchart?oid=${oid}&amp;format=interactive"></iframe>\n<!-- /wp:html -->`;
 
-  const rawContent = fetchWPPostRaw();
-  if (!rawContent) return;
+  const post = fetchWPPostRaw();
+  if (!post) return;
 
-  let updated = rawContent;
+  let updated = post.content;
 
   // Replace each placeholder paragraph with the corresponding iframe block
   updated = updated.replace(
@@ -549,7 +556,7 @@ function insertChartsIntoPost() {
     return;
   }
 
-  if (pushWPPost(updated)) {
+  if (pushWPPost(updated, post.title)) {
     console.log('Chart iframes inserted into blog post.');
     console.log(`Review: ${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`);
   }
@@ -564,6 +571,7 @@ function wpAuthHeader() {
   return 'Basic ' + Utilities.base64Encode(`${user}:${pass}`);
 }
 
+// Returns { content: string, title: string } or null.
 function fetchWPPostRaw() {
   try {
     const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}?context=edit`, {
@@ -574,7 +582,8 @@ function fetchWPPostRaw() {
       console.error(`WP GET raw failed: ${res.getResponseCode()}`);
       return null;
     }
-    return JSON.parse(res.getContentText()).content.raw;
+    const post = JSON.parse(res.getContentText());
+    return { content: post.content.raw, title: post.title.raw };
   } catch (e) {
     console.error(`WP raw fetch error: ${e.message}`);
     return null;
@@ -582,14 +591,16 @@ function fetchWPPostRaw() {
 }
 
 // Direct publish — only used for chart setup (insertChartsIntoPost).
-// Rate change updates go through savePendingRevision() for the approval flow.
-function pushWPPost(rawContent) {
+// Rate change updates go through saveWPAutosave() for the approval flow.
+function pushWPPost(rawContent, title) {
   try {
+    const payload = { content: rawContent };
+    if (title) payload.title = title;
     const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}`, {
       method: 'post',
       contentType: 'application/json',
       headers: { Authorization: wpAuthHeader() },
-      payload: JSON.stringify({ content: rawContent }),
+      payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
     if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) {
