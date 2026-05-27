@@ -40,6 +40,63 @@ Short and medium haul were priced identically before 2026-03-18. From that date 
 
 ---
 
+## Prerequisites — Cloud Function Proxy
+
+Cathay Pacific's website (Akamai CDN) blocks Google Apps Script's IP range. A lightweight Cloud Function acts as a proxy — Apps Script calls it, it calls Cathay, and returns the HTML. It runs on Google Cloud Run IPs which Akamai doesn't specifically block.
+
+### Deploy the proxy (one-time, ~5 minutes)
+
+**Requirements:** [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk/docs/install) installed and authenticated. Any GCP project works — this stays within the free tier (2M requests/month free).
+
+**1. Pick a GCP project**
+```bash
+gcloud config set project YOUR_PROJECT_ID
+```
+
+**2. Enable the Cloud Functions API** (first time only)
+```bash
+gcloud services enable cloudfunctions.googleapis.com
+```
+
+**3. Generate an API key** (any random string — save it)
+```bash
+openssl rand -hex 16
+# e.g. → a3f8c2d1e4b5a6f7c8d9e0f1a2b3c4d5
+```
+
+**4. Deploy**
+
+From the repo root:
+```bash
+gcloud functions deploy cathayProxy \
+  --runtime nodejs20 \
+  --region asia-east1 \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars PROXY_API_KEY=YOUR_KEY_FROM_STEP_3 \
+  --timeout 30 \
+  --memory 128MB \
+  --source fuel-surcharge-cathay/proxy
+```
+
+Deployment takes ~2 minutes. When it finishes, copy the **url** printed at the end:
+```
+url: https://asia-east1-YOUR_PROJECT_ID.cloudfunctions.net/cathayProxy
+```
+
+**5. Add to Apps Script Properties**
+
+In the Apps Script editor → ⚙️ Project Settings → Script Properties, add:
+
+| Property | Value |
+|---|---|
+| `PROXY_URL` | `https://asia-east1-YOUR_PROJECT_ID.cloudfunctions.net/cathayProxy` |
+| `PROXY_API_KEY` | *(the key you generated in step 3)* |
+
+After this, **Test Scrape Only** from the YQ Monitor menu should complete in under 10 seconds.
+
+---
+
 ## Prerequisites — Revisionary Plugin
 
 The approval flow requires the **Revisionary** plugin on WordPress. Without it, pending revisions cannot be created and rate changes will not reach the blog.

@@ -114,13 +114,43 @@ function runFuelSurchargeMonitor() {
 
 // ── Cathay Page Scraping ────────────────────────────────────────
 
+// Fetches the Cathay page, routing through the Cloud Function proxy when PROXY_URL is set.
+// Falls back to direct fetch if not configured (direct fetch is blocked by Cathay's Akamai CDN).
 function fetchUrl(url) {
-  try {
-    console.log(`Fetching: ${url}`);
-    const t0 = Date.now();
+  const props     = PropertiesService.getScriptProperties();
+  const proxyUrl  = props.getProperty('PROXY_URL');
+  const proxyKey  = props.getProperty('PROXY_API_KEY');
 
-    // Minimal headers — Akamai CDN drops or hangs connections with heavy custom header sets.
-    // Do NOT add Accept-Encoding; Apps Script handles that internally.
+  if (proxyUrl) {
+    return fetchViaProxy(proxyUrl, proxyKey);
+  }
+  console.warn('PROXY_URL not set — attempting direct fetch (likely blocked by Akamai CDN)');
+  return fetchDirect(url);
+}
+
+function fetchViaProxy(proxyUrl, apiKey) {
+  console.log(`Fetching via proxy: ${proxyUrl}`);
+  const t0 = Date.now();
+  try {
+    const opts = { muteHttpExceptions: true };
+    if (apiKey) opts.headers = { 'x-proxy-key': apiKey };
+    const res = UrlFetchApp.fetch(proxyUrl, opts);
+    console.log(`Proxy responded in ${((Date.now() - t0) / 1000).toFixed(1)}s — HTTP ${res.getResponseCode()}`);
+    if (res.getResponseCode() !== 200) {
+      console.error(`Proxy error: HTTP ${res.getResponseCode()} — ${res.getContentText().substring(0, 200)}`);
+      return null;
+    }
+    return res.getContentText();
+  } catch (e) {
+    console.error(`Proxy fetch error: ${e.message}`);
+    return null;
+  }
+}
+
+function fetchDirect(url) {
+  console.log(`Direct fetch: ${url}`);
+  const t0 = Date.now();
+  try {
     const res = UrlFetchApp.fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -128,15 +158,14 @@ function fetchUrl(url) {
       },
       muteHttpExceptions: true,
     });
-
-    console.log(`Fetch completed in ${((Date.now() - t0) / 1000).toFixed(1)}s — HTTP ${res.getResponseCode()}`);
+    console.log(`Direct fetch in ${((Date.now() - t0) / 1000).toFixed(1)}s — HTTP ${res.getResponseCode()}`);
     if (res.getResponseCode() !== 200) {
-      console.error(`HTTP ${res.getResponseCode()} for ${url}`);
+      console.error(`Direct fetch HTTP ${res.getResponseCode()}`);
       return null;
     }
     return res.getContentText();
   } catch (e) {
-    console.error(`Fetch error: ${e.message}`);
+    console.error(`Direct fetch error: ${e.message}`);
     return null;
   }
 }
