@@ -113,7 +113,7 @@ function runFuelSurchargeMonitor() {
 
   console.log(`Rate change: ${prevShort}/${prevMedium}/${prevLong} → ${current.short}/${current.medium}/${current.long}`);
 
-  logRateChange(now, current.short, current.medium, current.long);
+  logRateChange(now, current, prev);
 
   const prev = { short: prevShort, medium: prevMedium, long: prevLong };
 
@@ -469,11 +469,23 @@ function setupCharts() {
   const sheet = ss.getSheetByName(DATA_SHEET_NAME);
   if (!sheet) { console.error('YQ Data sheet not found'); return; }
 
-  const props   = PropertiesService.getScriptProperties();
-  const lastRow = sheet.getLastRow();
+  const props = PropertiesService.getScriptProperties();
 
-  // Remove all existing charts first (clean slate)
+  // Build step-chart data first (creates staircase effect — no false slopes)
+  const chartSheet = buildStepChartData(ss, sheet);
+
+  // Remove all existing charts (clean slate), then flush so removals commit
   sheet.getCharts().forEach(c => sheet.removeChart(c));
+  SpreadsheetApp.flush();
+
+  // Ensure the sheet has enough rows to anchor charts at rows 2, 22, 42
+  const neededRows = 80;
+  if (sheet.getMaxRows() < neededRows) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), neededRows - sheet.getMaxRows());
+  }
+
+  // Use a large fixed range so future rows in _chart_data are auto-included
+  const MAX_ROWS = 1000;
 
   const chartDefs = [
     { col: 2, color: '#b38850', label: '短途 YQ (HKD)',  propKey: 'CHART_OID_SHORT',  anchorRow: 2,  anchorCol: 6 },
@@ -484,32 +496,76 @@ function setupCharts() {
   chartDefs.forEach(def => {
     const chart = sheet.newChart()
       .setChartType(Charts.ChartType.LINE)
-      .addRange(sheet.getRange(1, 1, lastRow, 1)) // date column (col A)
-      .addRange(sheet.getRange(1, def.col, lastRow, 1)) // value column
+      .addRange(chartSheet.getRange(1, 1, MAX_ROWS, 1))       // date column from _chart_data
+      .addRange(chartSheet.getRange(1, def.col, MAX_ROWS, 1)) // value column from _chart_data
       .setOption('title', '國泰燃油附加費 — ' + def.label)
       .setOption('colors', [def.color])
-      .setOption('hAxis.format', 'MMM yyyy')
+      .setOption('hAxis.format', 'yyyy-MM')
       .setOption('hAxis.title', '')
       .setOption('vAxis.title', 'HKD')
       .setOption('vAxis.minValue', 0)
       .setOption('legend.position', 'none')
       .setOption('lineWidth', 2)
-      .setOption('pointSize', 5)
+      .setOption('pointSize', 4)
       .setOption('width', 900)
       .setOption('height', 380)
       .setPosition(def.anchorRow, def.anchorCol, 0, 0)
       .build();
 
     const inserted = sheet.insertChart(chart);
+    SpreadsheetApp.flush(); // commit each chart before reading its ID
     const oid = inserted.getChartId();
     props.setProperty(def.propKey, String(oid));
     console.log(`${def.label} chart created. OID: ${oid}`);
   });
 
-  console.log('');
   console.log('Next step: publish this sheet to the web.');
   console.log('File → Share → Publish to the web → select "Entire Document" → Publish → OK');
   console.log('Then run "Insert Charts into Post" from the YQ Monitor menu.');
+}
+
+// Builds (or rebuilds) a hidden '_chart_data' sheet with bridge rows inserted between
+// each rate change so line charts display a staircase rather than false slopes.
+// For each rate period: [change_date, rate] then [next_change_date − 1 day, same_rate].
+// Called by setupCharts() and automatically by logRateChange() on every update.
+function buildStepChartData(ss, dataSheet) {
+  if (!ss)        ss        = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
+  if (!dataSheet) dataSheet = ss.getSheetByName(DATA_SHEET_NAME);
+
+  const CHART_SHEET = '_chart_data';
+  let chartSheet = ss.getSheetByName(CHART_SHEET);
+  if (!chartSheet) {
+    chartSheet = ss.insertSheet(CHART_SHEET);
+    chartSheet.hideSheet();
+  } else {
+    chartSheet.clearContents();
+  }
+
+  const data = dataSheet.getDataRange().getValues();
+  const rows = data.slice(1).filter(r => r[0]); // skip header + empty rows
+
+  const output = [data[0]]; // header row
+
+  for (let i = 0; i < rows.length; i++) {
+    const [date, s, m, l] = rows[i];
+    const dateObj = date instanceof Date ? date : new Date(date);
+    output.push([dateObj, s, m, l]);
+
+    if (i < rows.length - 1) {
+      // Bridge point: hold the current value until 1 day before the next change
+      const nextDate  = rows[i + 1][0] instanceof Date ? rows[i + 1][0] : new Date(rows[i + 1][0]);
+      const bridgeDay = new Date(nextDate.getTime() - 86400000);
+      output.push([bridgeDay, s, m, l]);
+    }
+  }
+
+  if (output.length > 1) {
+    chartSheet.getRange(1, 1, output.length, 4).setValues(output);
+    chartSheet.getRange(2, 1, output.length - 1, 1).setNumberFormat('yyyy-MM-dd');
+  }
+
+  console.log(`Step chart data rebuilt: ${rows.length} periods → ${output.length - 1} rows`);
+  return chartSheet;
 }
 
 // Replaces the chart placeholder paragraphs in the WP post with Google Sheets iframe embeds.
@@ -553,7 +609,7 @@ function insertChartsIntoPost() {
     iframeBlock(oidLong, '國泰長途燃油附加費走勢')
   );
 
-  if (updated === rawContent) {
+  if (updated === post.content) {
     console.warn('No placeholder paragraphs found — charts may already be embedded, or placeholders differ from expected format.');
     return;
   }
@@ -619,16 +675,16 @@ function pushWPPost(rawContent, title) {
 
 // ── Sheet Logging ───────────────────────────────────────────────
 
-function logRateChange(date, short, medium, long) {
+function logRateChange(date, current, prev) {
   const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
   const sheet = ss.getSheetByName(DATA_SHEET_NAME);
   if (!sheet) { console.error(`Sheet "${DATA_SHEET_NAME}" not found`); return; }
   const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd');
-  // Write the Date object (not a string) so the chart X-axis is proportional time
-  sheet.appendRow([date, short, medium, long]);
-  const lastRow = sheet.getLastRow();
-  sheet.getRange(lastRow, 1).setNumberFormat('yyyy-MM-dd');
-  console.log(`Logged: ${dateStr} | short=${short} | medium=${medium} | long=${long}`);
+  sheet.appendRow([date, current.short, current.medium, current.long]);
+  sheet.getRange(sheet.getLastRow(), 1).setNumberFormat('yyyy-MM-dd');
+  console.log(`Logged: ${dateStr} | short=${current.short} | medium=${current.medium} | long=${current.long}`);
+  // Rebuild step-chart data so charts always show correct staircase (no false slopes)
+  buildStepChartData(ss, sheet);
 }
 
 // Converts any text-string dates in column A to proper Date values.
