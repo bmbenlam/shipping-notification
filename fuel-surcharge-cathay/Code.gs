@@ -1,6 +1,6 @@
 // ── Configuration ──────────────────────────────────────────────
 // Container-bound: fill DATA_SPREADSHEET_ID with the sheet ID after creating it.
-const DATA_SPREADSHEET_ID = 'YOUR_SHEET_ID_HERE';
+const DATA_SPREADSHEET_ID = '1QQe7PdG1pciliASv23YCyPkBiGIrr-WYYK00kzsNgvU';
 const DATA_SHEET_NAME     = 'YQ Data';
 const ALERT_EMAIL  = 'info@flyasia.co';
 const HEIDI_EMAIL  = 'heidi@flyasia.co';
@@ -13,7 +13,7 @@ const CATHAY_YQ_URL = 'https://www.cathaypacific.com/cx/zh_HK/latest-news/other-
 
 // Rates change on the 1st and 15th; run hourly but only act daily outside that window.
 // HIGH_FREQ_DAYS: ±2 days around each expected change date.
-const HIGH_FREQ_DAYS = new Set([28, 29, 30, 31, 1, 2, 3, 13, 14, 15, 16, 17]);
+const HIGH_FREQ_DAYS = new Set([28, 29, 30, 31, 1, 2, 14, 15, 16]);
 
 // ── Menu / Triggers ─────────────────────────────────────────────
 
