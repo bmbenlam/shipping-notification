@@ -3,6 +3,7 @@
 const DATA_SPREADSHEET_ID = 'YOUR_SHEET_ID_HERE';
 const DATA_SHEET_NAME     = 'YQ Data';
 const ALERT_EMAIL  = 'info@flyasia.co';
+const HEIDI_EMAIL  = 'heidi@flyasia.co';
 const FROM_EMAIL   = 'info@flyasia.co';
 const WP_SITE      = 'https://www.flyasia.co';
 const WP_POST_ID   = 18512;
@@ -78,14 +79,16 @@ function runFuelSurchargeMonitor() {
   logRateChange(now, current.short, current.medium, current.long);
 
   const prev = { short: prevShort, medium: prevMedium, long: prevLong };
-  updateBlogPost(current, prev, now);
+
+  // Build the updated blog post content, proofread it, and save as pending revision
+  const { revisionId, proofResult } = prepareBlogRevision(current, prev, now);
 
   props.setProperty('YQ_LAST_SHORT',  String(current.short));
   props.setProperty('YQ_LAST_MEDIUM', String(current.medium));
   props.setProperty('YQ_LAST_LONG',   String(current.long));
   props.setProperty('YQ_LAST_CHANGE', now.toISOString());
 
-  sendRateChangeAlert(prev, current, now);
+  sendApprovalRequest(prev, current, now, proofResult, revisionId);
   console.log('Monitor run complete');
 }
 
@@ -142,17 +145,51 @@ function extractYQRates(html) {
   return null;
 }
 
-// ── Blog Post Update ────────────────────────────────────────────
+// ── Blog Post Revision (Approval Flow) ─────────────────────────
+// Builds the updated content, proofreads with Claude, and saves as a
+// Revisionary pending revision — the live post is NOT touched until
+// an editor approves it in the WordPress admin.
 
-function updateBlogPost(current, prev, date) {
+function prepareBlogRevision(current, prev, date) {
   const rawContent = fetchWPPostRaw();
-  if (!rawContent) return;
+  if (!rawContent) return { revisionId: null, proofResult: '（無法取得文章內容）' };
 
   let updated = updateDateLine(rawContent, date);
   updated = updateCurrentRatesTable(updated, current, prev, date);
   updated = prependHistoryRow(updated, current, date);
 
-  pushWPPost(updated);
+  const proofResult = proofreadWithClaude(current, updated);
+  console.log(`Proofread result: ${proofResult}`);
+
+  const revisionId = savePendingRevision(updated);
+  return { revisionId, proofResult };
+}
+
+// POSTs to Revisionary as a pending revision. The live post is unchanged
+// until an editor clicks Approve in WordPress admin.
+// Returns the revision ID on success, or null on failure.
+function savePendingRevision(rawContent) {
+  try {
+    const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}`, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: wpAuthHeader() },
+      payload: JSON.stringify({ content: rawContent, status: 'pending-revision' }),
+      muteHttpExceptions: true,
+    });
+    const code = res.getResponseCode();
+    if (code < 200 || code >= 300) {
+      console.error(`savePendingRevision failed: HTTP ${code} — ${res.getContentText().substring(0, 300)}`);
+      return null;
+    }
+    const data = JSON.parse(res.getContentText());
+    const revisionId = data.id || data.parent || null;
+    console.log(`Pending revision saved (HTTP ${code}, revision id: ${revisionId})`);
+    return revisionId;
+  } catch (e) {
+    console.error(`savePendingRevision error: ${e.message}`);
+    return null;
+  }
 }
 
 // Updates: <strong>更新日期：YYYY 年 M 月 D 日</strong>
@@ -167,7 +204,6 @@ function updateDateLine(content, date) {
 function updateCurrentRatesTable(content, current, prev, date) {
   const effectiveDate = `${formatChineseDate(date)}起`;
 
-  // Short haul row: <strong>短途</strong> ... </td><td>HK$XXX</td><td>日期</td><td>▲▼ HK$X</td>
   content = replaceRateRow(content, '短途', current.short,  prev.short,  effectiveDate);
   content = replaceRateRow(content, '中途', current.medium, prev.medium, effectiveDate);
   content = replaceRateRow(content, '長途', current.long,   prev.long,   effectiveDate);
@@ -194,7 +230,6 @@ function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
 // Prepends a new row to the historical rates table
 // (the table whose <thead> contains 生效日期/短途/中途/長途)
 function prependHistoryRow(content, rates, date) {
-  const dateCell = formatChineseDateNoDay(date); // "YYYY 年 M 月 D 日" (full)
   const newRow = `<tr><td>${formatChineseDate(date)}</td><td>${formatHKD(rates.short)}</td><td>${formatHKD(rates.medium)}</td><td>${formatHKD(rates.long)}</td></tr>`;
 
   // Find the tbody of the history table (identified by 生效日期 in its thead)
@@ -202,6 +237,71 @@ function prependHistoryRow(content, rates, date) {
     /(生效日期<\/th>[\s\S]{0,200}?<tbody>)/,
     `$1${newRow}`
   );
+}
+
+// ── Claude Proofread ────────────────────────────────────────────
+
+// Extracts the key sections (date line, current-rates table) from the post content
+// to send to Claude for a sanity check.
+function extractYQKeySection(content) {
+  const dateMatch = content.match(/<strong>更新日期：[^<]+<\/strong>/);
+  const rateTableMatch = content.match(/短途[\s\S]{0,1000}?長途[\s\S]{0,500}?<\/table>/);
+  const parts = [];
+  if (dateMatch)     parts.push(dateMatch[0]);
+  if (rateTableMatch) parts.push(rateTableMatch[0]);
+  return parts.join('\n\n') || content.substring(0, 2000);
+}
+
+// Calls Claude Haiku to proofread the key post sections for numerical inconsistencies.
+// Returns '無問題' if all looks correct, or a short description of the issue found.
+function proofreadWithClaude(rates, updatedContent) {
+  const props   = PropertiesService.getScriptProperties();
+  const apiKey  = props.getProperty('ANTHROPIC_API_KEY');
+  if (!apiKey) {
+    console.log('ANTHROPIC_API_KEY not set — skipping proofread');
+    return '（未設定 API Key，已跳過校對）';
+  }
+
+  const keySection = extractYQKeySection(updatedContent);
+  const prompt = [
+    `你是文章校對員。以下是一篇關於國泰航空燃油附加費的博客文章片段，剛剛更新了以下數值：`,
+    `短途 YQ: ${formatHKD(rates.short)}，中途 YQ: ${formatHKD(rates.medium)}，長途 YQ: ${formatHKD(rates.long)}`,
+    ``,
+    `請檢查以下內容，確認日期和金額數字一致，沒有矛盾或舊數據殘留。`,
+    `如沒有問題，只回覆「無問題」。如有問題，簡短描述（不超過 80 字）。`,
+    ``,
+    `--- 文章片段 ---`,
+    keySection,
+    `--- 結束 ---`,
+  ].join('\n');
+
+  try {
+    const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      payload: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      muteHttpExceptions: true,
+    });
+
+    if (res.getResponseCode() !== 200) {
+      console.error(`Claude API error: ${res.getResponseCode()}`);
+      return '（Claude API 錯誤，已跳過校對）';
+    }
+
+    const text = JSON.parse(res.getContentText()).content[0].text.trim();
+    return text;
+  } catch (e) {
+    console.error(`proofreadWithClaude error: ${e.message}`);
+    return '（校對時出現錯誤）';
+  }
 }
 
 // ── Interactive Charts Setup ────────────────────────────────────
@@ -261,6 +361,7 @@ function setupCharts() {
 
 // Replaces the chart placeholder paragraphs in the WP post with Google Sheets iframe embeds.
 // Must run setupCharts() and publish the sheet before calling this.
+// Publishes directly to the live post (admin-only chart setup, not subject to approval flow).
 function insertChartsIntoPost() {
   const props = PropertiesService.getScriptProperties();
   const sheetId = DATA_SPREADSHEET_ID === 'YOUR_SHEET_ID_HERE'
@@ -336,6 +437,8 @@ function fetchWPPostRaw() {
   }
 }
 
+// Direct publish — only used for chart setup (insertChartsIntoPost).
+// Rate change updates go through savePendingRevision() for the approval flow.
 function pushWPPost(rawContent) {
   try {
     const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}`, {
@@ -370,25 +473,46 @@ function logRateChange(date, short, medium, long) {
 
 // ── Notification Emails ─────────────────────────────────────────
 
-function sendRateChangeAlert(prev, current, date) {
+// Sends an approval request to both info@ and heidi@, with rate changes,
+// proofread result, and a direct link to review and approve the pending revision.
+function sendApprovalRequest(prev, current, date, proofResult, revisionId) {
   const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd');
-  const subject = `[CX YQ] 燃油附加費更新 | 短途 ${formatHKD(current.short)} | 中途 ${formatHKD(current.medium)} | 長途 ${formatHKD(current.long)} | ${dateStr}`;
+  const subject = `[CX YQ] 待審批修訂 | 短途 ${formatHKD(current.short)} | 中途 ${formatHKD(current.medium)} | 長途 ${formatHKD(current.long)} | ${dateStr}`;
+
+  const proofLine = (proofResult && proofResult !== '無問題')
+    ? `⚠ Claude 校對發現問題：\n  ${proofResult}\n\n  請在批准前仔細核對文章內容。`
+    : `✓ Claude 校對：無問題`;
+
+  const reviewUrl  = `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
+  const revisionsUrl = `${WP_SITE}/wp-admin/revision.php?revision=${revisionId || ''}`;
+
   const body = [
-    '國泰燃油附加費有變更：',
+    '國泰燃油附加費有變更，已準備好待審批的文章修訂。',
+    '請在 WordPress 後台審閱並批准後發布。',
     '',
+    '── 費率變更 ──',
     `短途 (Short Haul):   ${formatHKD(prev.short)}  →  ${formatHKD(current.short)}  ${diffText(prev.short, current.short)}`,
     `中途 (Medium Haul):  ${formatHKD(prev.medium)} →  ${formatHKD(current.medium)} ${diffText(prev.medium, current.medium)}`,
     `長途 (Long Haul):    ${formatHKD(prev.long)}   →  ${formatHKD(current.long)}   ${diffText(prev.long, current.long)}`,
     '',
-    `博客文章已更新: ${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`,
+    '── 自動校對結果 ──',
+    proofLine,
     '',
-    '請手動確認:',
+    '── 審批連結 ──',
+    revisionId
+      ? `修訂記錄: ${revisionsUrl}`
+      : `文章編輯: ${reviewUrl}`,
+    `文章後台: ${reviewUrl}`,
+    '',
+    '── 審批後請確認 ──',
     '  - 現行收費表數值正確',
     '  - 歷史收費表已新增最新一行',
-    '  - 正文中的示例金額是否需要手動更新',
+    '  - 正文中的示例金額是否需要手動更新（如 HK$339 x 2 = HK$678）',
   ].join('\n');
-  GmailApp.sendEmail(ALERT_EMAIL, subject, body, { from: FROM_EMAIL });
-  console.log(`Alert sent: ${subject}`);
+
+  const recipients = [ALERT_EMAIL, HEIDI_EMAIL].join(',');
+  GmailApp.sendEmail(recipients, subject, body, { from: FROM_EMAIL });
+  console.log(`Approval request sent to ${recipients}: ${subject}`);
 }
 
 function sendErrorAlert(message, dateLabel) {
@@ -427,16 +551,17 @@ function formatChineseDate(date) {
 }
 
 // ── One-time Setup ──────────────────────────────────────────────
-// 1. Create a Google Sheet with a tab named 'YQ Data'.
+// 1. Install the Revisionary plugin on WordPress (required for approval flow).
+// 2. Create a Google Sheet with a tab named 'YQ Data'.
 //    Headers: date | short_haul_hkd | medium_haul_hkd | long_haul_hkd
 //    Import cx_yq_history.csv into rows 2 onward.
-// 2. In Project Settings, set timezone to Asia/Hong_Kong.
-// 3. Set Script Properties: WP_USERNAME, WP_APP_PASSWORD.
-// 4. Fill in DATA_SPREADSHEET_ID above.
-// 5. Run setupCharts() from the YQ Monitor menu.
-// 6. Publish the sheet: File → Share → Publish to the web → Publish.
-// 7. Run insertChartsIntoPost() from the YQ Monitor menu.
-// 8. Run setupTrigger() once to start the hourly monitoring trigger.
+// 3. In Project Settings, set timezone to Asia/Hong_Kong.
+// 4. Set Script Properties: WP_USERNAME, WP_APP_PASSWORD, ANTHROPIC_API_KEY.
+// 5. Fill in DATA_SPREADSHEET_ID above.
+// 6. Run setupCharts() from the YQ Monitor menu.
+// 7. Publish the sheet: File → Share → Publish to the web → Publish.
+// 8. Run insertChartsIntoPost() from the YQ Monitor menu.
+// 9. Run setupTrigger() once to start the hourly monitoring trigger.
 
 // function setupTrigger() {
 //   ScriptApp.newTrigger('runFuelSurchargeMonitor')

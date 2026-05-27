@@ -40,6 +40,16 @@ Short and medium haul were priced identically before 2026-03-18. From that date 
 
 ---
 
+## Prerequisites — Revisionary Plugin
+
+The approval flow requires the **Revisionary** plugin on WordPress. Without it, pending revisions cannot be created and rate changes will not reach the blog.
+
+1. In WordPress admin: **Plugins → Add New** → search **Revisionary** → Install and Activate
+2. The plugin intercepts REST API posts with `status: pending-revision` and queues them as pending revisions
+3. Editors receive an approval request email and can publish from **Posts → Pending Revisions** in WP admin
+
+---
+
 ## Step 1 — Import Historical Data
 
 1. In Google Drive, create a new Google Sheet
@@ -88,6 +98,9 @@ Replace with the actual Sheet ID from Step 1.
 |---|---|
 | `WP_USERNAME` | `ai@flyasia.co` |
 | `WP_APP_PASSWORD` | *(WordPress application password for ai@flyasia.co)* |
+| `ANTHROPIC_API_KEY` | *(your Anthropic API key — for Claude proofread)* |
+
+> **ANTHROPIC_API_KEY**: Available at [console.anthropic.com](https://console.anthropic.com). If omitted, the proofread step is skipped silently.
 
 ---
 
@@ -154,18 +167,29 @@ The charts need to be publicly accessible for the iframe embeds to work without 
 
 ---
 
-## Blog Post Auto-Updates
+## Approval Flow
 
-When a rate change is detected, the script automatically updates:
+When a rate change is detected, the script does **not** publish immediately. Instead:
 
-| Section | What changes |
-|---|---|
-| `更新日期：` line | Updated to the change date |
-| Current-rates table | Rate, effective date (`YYYY 年 M 月 D 日起`), and ▲▼ comparison for all 3 rows |
-| Historical-rates table | A new row is prepended at the top |
-| Charts | Auto-update via Google Sheets — no action needed |
+1. **Logs** the new rates to the `YQ Data` sheet (charts update automatically)
+2. **Builds** the updated blog post content:
+   - `更新日期：` line → new date
+   - Current-rates table → new rate, effective date, ▲▼ comparison for all 3 rows
+   - Historical-rates table → new row prepended at top
+3. **Proofreads** the updated content using Claude Haiku (checks for numerical inconsistencies)
+4. **Saves a pending revision** via the Revisionary plugin — the live post is untouched
+5. **Sends an approval request email** to `info@flyasia.co` and `heidi@flyasia.co` with:
+   - Rate changes (before → after, ▲▼ diff)
+   - Claude proofread result (✓ or ⚠ with note)
+   - Direct link to the WP admin revision for one-click approval
 
-The alert email will remind you to manually verify the example amounts in the body text (e.g. `HK$339 x 2 = HK$678`) as these are narrative text, not table cells.
+### To publish the pending revision
+
+1. Open the link in the approval email, or go to **WordPress admin → Posts → [the post] → Revisions**
+2. Review the changes (diff view shows exactly what changed)
+3. Click **Approve** — the pending revision becomes the live post immediately
+
+> Charts update automatically every time new data is logged, regardless of whether the revision has been approved. No manual action needed for charts.
 
 ---
 
@@ -188,3 +212,7 @@ To fix: inspect the page source at `cathaypacific.com/cx/zh_HK/.../fuel-surcharg
 | Blog date/rates not updating | Regex mismatch in post content | Check `updateDateLine()` / `replaceRateRow()` patterns |
 | Historical table not updated | `生效日期` heading pattern changed | Update `prependHistoryRow()` regex |
 | WP POST fails (401) | Wrong credentials | Re-check `WP_USERNAME` and `WP_APP_PASSWORD` |
+| Pending revision not created | Revisionary plugin not installed or inactive | Install and activate Revisionary (see Prerequisites section) |
+| Approval email not received | Wrong recipients or `from` alias not set up | Verify `ALERT_EMAIL` / `HEIDI_EMAIL` constants and `info@flyasia.co` Send As alias |
+| Claude proofread skipped | `ANTHROPIC_API_KEY` not set | Add the property in Project Settings → Script Properties |
+| Revision link in email is broken | Revisionary returns different revision ID field | Go to WP admin → Posts → Revisions to find pending revision manually |
