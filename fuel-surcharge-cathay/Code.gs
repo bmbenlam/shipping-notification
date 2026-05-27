@@ -23,7 +23,6 @@ function onOpen() {
     .addItem('Run Check Now',              'triggerManualRun')
     .addItem('Force Full Run (test)',      'forceFullRun')
     .addItem('Test Scrape Only',           'testScrapeOnly')
-    .addItem('Publish Staged Update',      'publishStagedUpdate')
     .addSeparator()
     .addItem('Setup Charts (first run)',   'setupCharts')
     .addItem('Insert Charts into Post',    'insertChartsIntoPost')
@@ -117,15 +116,15 @@ function runFuelSurchargeMonitor() {
 
   const prev = { short: prevShort, medium: prevMedium, long: prevLong };
 
-  // Build the updated blog post content, proofread it, and save as pending revision
-  const { proofResult } = prepareBlogRevision(current, prev, now);
+  // Build the updated blog post content, proofread it, and save as WP autosave revision
+  const { proofResult, revisionUrl } = prepareBlogRevision(current, prev, now);
 
   props.setProperty('YQ_LAST_SHORT',  String(current.short));
   props.setProperty('YQ_LAST_MEDIUM', String(current.medium));
   props.setProperty('YQ_LAST_LONG',   String(current.long));
   props.setProperty('YQ_LAST_CHANGE', now.toISOString());
 
-  sendApprovalRequest(prev, current, now, proofResult);
+  sendApprovalRequest(prev, current, now, proofResult, revisionUrl);
   console.log('Monitor run complete');
 }
 
@@ -247,18 +246,26 @@ function lastHKDInRow(sectionHtml) {
   return vals.length ? parseInt(vals[vals.length - 1][1]) : null;
 }
 
-// ── Blog Post Staging (Approval Flow) ──────────────────────────
-// The updated content is stored in a hidden sheet tab (_pending) rather than
-// pushed to WordPress directly. The live post is never touched automatically.
-// After reviewing the approval email, an editor clicks:
-//   YQ Monitor → Publish Staged Update
-// which reads the staged content from the sheet and publishes it.
-
-const PENDING_SHEET_NAME = '_pending';
+// ── Blog Post Revision (Approval Flow) ─────────────────────────
+// When a rate change is detected the script builds the updated content,
+// saves it as a WordPress autosave revision (native WP feature — no plugin
+// needed), and emails both editors a direct link to the revision for review.
+// The live post is NEVER changed automatically.
+//
+// To publish: open the revision link in the email → click "Restore This
+// Revision" → review in the editor → click "Update".
 
 function prepareBlogRevision(current, prev, date) {
   const rawContent = fetchWPPostRaw();
-  if (!rawContent) return { proofResult: '（無法取得文章內容）' };
+  if (!rawContent) {
+    console.error('WP post fetch returned null — check WP_USERNAME / WP_APP_PASSWORD');
+    return { proofResult: '（無法取得文章內容）', revisionUrl: null };
+  }
+  if (rawContent.length < 500) {
+    console.error(`WP post content is only ${rawContent.length} chars — post appears empty. ` +
+      'Paste the full template content into post 170448 before running the monitor.');
+    return { proofResult: '（文章內容過短，請先貼上完整模板）', revisionUrl: null };
+  }
 
   let updated = updateDateLine(rawContent, date);
   updated = updateCurrentRatesTable(updated, current, prev, date);
@@ -267,67 +274,36 @@ function prepareBlogRevision(current, prev, date) {
   const proofResult = proofreadWithClaude(current, updated);
   console.log(`Proofread result: ${proofResult}`);
 
-  stagePendingUpdate(updated, current, prev, date);
-  return { proofResult };
+  const revisionId  = saveWPAutosave(updated);
+  const revisionUrl = revisionId
+    ? `${WP_SITE}/wp-admin/revision.php?revision=${revisionId}`
+    : `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
+
+  return { proofResult, revisionUrl };
 }
 
-// Saves the proposed updated content to a hidden sheet tab so it can be
-// reviewed and published manually via the menu — live post is untouched.
-function stagePendingUpdate(updatedContent, current, prev, date) {
-  const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
-  let sheet   = ss.getSheetByName(PENDING_SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(PENDING_SHEET_NAME);
-    sheet.hideSheet();
-  }
-  sheet.clearContents();
-  const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd HH:mm:ss');
-  sheet.getRange('A1').setValue(dateStr);
-  sheet.getRange('A2').setValue(JSON.stringify({ current, prev }));
-  // Content may exceed a single cell limit — split into 40,000-char chunks across rows A3+
-  const chunkSize = 40000;
-  for (let i = 0; i < updatedContent.length; i += chunkSize) {
-    sheet.getRange(3 + Math.floor(i / chunkSize), 1).setValue(updatedContent.slice(i, i + chunkSize));
-  }
-  console.log(`Staged update saved to "${PENDING_SHEET_NAME}" sheet (${updatedContent.length} chars)`);
-}
-
-// Called from the menu: reads the staged content and publishes it to WordPress.
-function publishStagedUpdate() {
-  const ss    = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(DATA_SPREADSHEET_ID);
-  const sheet = ss.getSheetByName(PENDING_SHEET_NAME);
-  if (!sheet || sheet.getLastRow() < 3) {
-    SpreadsheetApp.getUi().alert('No staged update found. Run the monitor first to stage a pending update.');
-    return;
-  }
-
-  const dateStr = sheet.getRange('A1').getValue();
-  const meta    = JSON.parse(sheet.getRange('A2').getValue() || '{}');
-
-  // Reassemble content from chunked rows
-  let updatedContent = '';
-  for (let row = 3; row <= sheet.getLastRow(); row++) {
-    updatedContent += sheet.getRange(row, 1).getValue();
-  }
-
-  const ui = SpreadsheetApp.getUi();
-  const confirm = ui.alert(
-    'Publish staged update?',
-    `This will publish the staged update from ${dateStr} to the live blog post.\n\nRates: short=${meta.current && meta.current.short}, medium=${meta.current && meta.current.medium}, long=${meta.current && meta.current.long}\n\nProceed?`,
-    ui.ButtonSet.YES_NO
-  );
-  if (confirm !== ui.Button.YES) {
-    console.log('Publish cancelled by user');
-    return;
-  }
-
-  if (pushWPPost(updatedContent)) {
-    sheet.clearContents();
-    sheet.hideSheet();
-    ui.alert('Published successfully. The live post has been updated.');
-    console.log('Staged update published and _pending sheet cleared');
-  } else {
-    ui.alert('Publish failed — check the Executions log for details.');
+// Saves content as a WordPress autosave revision.
+// The live post is untouched; the revision appears in WP Admin → Revisions.
+// Returns the revision ID on success, null on failure.
+function saveWPAutosave(rawContent) {
+  try {
+    const res = UrlFetchApp.fetch(`${WP_SITE}/wp-json/wp/v2/posts/${WP_POST_ID}/autosaves`, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: wpAuthHeader() },
+      payload: JSON.stringify({ content: rawContent }),
+      muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) {
+      console.error(`WP autosave failed: HTTP ${res.getResponseCode()} — ${res.getContentText().substring(0, 300)}`);
+      return null;
+    }
+    const result = JSON.parse(res.getContentText());
+    console.log(`WP autosave created: revision ID ${result.id}`);
+    return result.id;
+  } catch (e) {
+    console.error(`WP autosave error: ${e.message}`);
+    return null;
   }
 }
 
@@ -642,8 +618,8 @@ function logRateChange(date, short, medium, long) {
 // ── Notification Emails ─────────────────────────────────────────
 
 // Sends an approval request to both info@ and heidi@, with rate changes,
-// proofread result, and a direct link to review and approve the pending revision.
-function sendApprovalRequest(prev, current, date, proofResult) {
+// proofread result, and a direct link to the WordPress revision for review.
+function sendApprovalRequest(prev, current, date, proofResult, revisionUrl) {
   const dateStr = Utilities.formatDate(date, 'Asia/Hong_Kong', 'yyyy-MM-dd');
   const subject = `[CX YQ] 待審批修訂 | 短途 ${formatHKD(current.short)} | 中途 ${formatHKD(current.medium)} | 長途 ${formatHKD(current.long)} | ${dateStr}`;
 
@@ -651,11 +627,11 @@ function sendApprovalRequest(prev, current, date, proofResult) {
     ? `⚠ Claude 校對發現問題：\n  ${proofResult}\n\n  請在批准前仔細核對文章內容。`
     : `✓ Claude 校對：無問題`;
 
-  const reviewUrl = `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
+  const editUrl     = `${WP_SITE}/wp-admin/post.php?post=${WP_POST_ID}&action=edit`;
+  const reviewLink  = revisionUrl || editUrl;
 
   const body = [
-    '國泰燃油附加費有變更，文章更新已備妥待審批。',
-    '請在 Google Sheet 的 YQ Monitor 選單點擊「Publish Staged Update」發布。',
+    '國泰燃油附加費有變更，更新版本已儲存至 WordPress 修訂版本。',
     '',
     '── 費率變更 ──',
     `短途 (Short Haul):   ${formatHKD(prev.short)}  →  ${formatHKD(current.short)}  ${diffText(prev.short, current.short)}`,
@@ -666,14 +642,20 @@ function sendApprovalRequest(prev, current, date, proofResult) {
     proofLine,
     '',
     '── 發布步驟 ──',
-    '1. 檢視現時文章: ' + reviewUrl,
-    '2. 確認費率及校對結果無誤',
-    '3. 開啟 Google Sheet → YQ Monitor 選單 → Publish Staged Update',
+    '1. 點擊以下連結查看修訂版本：',
+    '   ' + reviewLink,
+    '2. 確認日期及費率正確',
+    '3. 點擊「Restore This Revision」',
+    '4. 返回文章編輯頁 → 點擊「Update」正式發布',
+    '',
+    '   （如連結為修訂比較頁，直接找右側最新版本的 Restore 按鈕即可）',
     '',
     '── 發布後請確認 ──',
     '  - 現行收費表數值正確',
     '  - 歷史收費表已新增最新一行',
-    '  - 正文中的示例金額是否需要手動更新（如 HK$339 x 2 = HK$678）',
+    '  - 正文示例金額如需手動更新請一並處理',
+    '',
+    '文章編輯頁: ' + editUrl,
   ].join('\n');
 
   const recipients = [ALERT_EMAIL, HEIDI_EMAIL].join(',');
@@ -717,17 +699,22 @@ function formatChineseDate(date) {
 }
 
 // ── One-time Setup ──────────────────────────────────────────────
-// 1. Install the Revisionary plugin on WordPress (required for approval flow).
-// 2. Create a Google Sheet with a tab named 'YQ Data'.
+// 1. Create a Google Sheet with a tab named 'YQ Data'.
 //    Headers: date | short_haul_hkd | medium_haul_hkd | long_haul_hkd
 //    Import cx_yq_history.csv into rows 2 onward.
-// 3. In Project Settings, set timezone to Asia/Hong_Kong.
-// 4. Set Script Properties: WP_USERNAME, WP_APP_PASSWORD, ANTHROPIC_API_KEY.
-// 5. Fill in DATA_SPREADSHEET_ID above.
+// 2. In Project Settings, set timezone to Asia/Hong_Kong.
+// 3. Set Script Properties: WP_USERNAME, WP_APP_PASSWORD, ANTHROPIC_API_KEY,
+//    PROXY_URL, PROXY_API_KEY.
+// 4. Fill in DATA_SPREADSHEET_ID above.
+// 5. Paste the full post template into WP post 170448 and publish it.
 // 6. Run setupCharts() from the YQ Monitor menu.
 // 7. Publish the sheet: File → Share → Publish to the web → Publish.
 // 8. Run insertChartsIntoPost() from the YQ Monitor menu.
 // 9. Run setupTrigger() once to start the hourly monitoring trigger.
+//
+// Approval flow (no plugin required):
+//   Rate change detected → WP autosave revision created → approval email sent
+//   → editor opens revision link → Restore This Revision → Update
 
 // function setupTrigger() {
 //   ScriptApp.newTrigger('runFuelSurchargeMonitor')
