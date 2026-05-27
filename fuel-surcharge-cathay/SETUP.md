@@ -1,6 +1,6 @@
-# Cathay Pacific Fuel Surcharge Monitor — Apps Script Setup Guide
+# Cathay Pacific Fuel Surcharge Monitor — Setup Guide
 
-This script monitors Cathay Pacific's fuel surcharge page, logs rate changes to a Google Sheet, and automatically updates the FlyAsia blog post (Post ID 18512) — including three interactive trend charts (short / medium / long haul) embedded directly from Google Sheets.
+This script monitors Cathay Pacific's fuel surcharge page, logs rate changes to a Google Sheet, and automatically saves a WordPress revision for editor review. Three interactive trend charts (short / medium / long haul) are embedded in the blog post directly from Google Sheets.
 
 ---
 
@@ -10,10 +10,11 @@ This script monitors Cathay Pacific's fuel surcharge page, logs rate changes to 
 2. **Smart frequency**: acts every hour around the 1st and 15th of the month (±2 days); otherwise once per day
 3. On each run: scrapes Cathay's page for current short-haul (短途), medium-haul (中途), and long-haul (長途) YQ values
 4. **If rates changed**:
-   - Appends a new row to the `YQ Data` sheet → the 3 embedded charts update automatically
-   - Updates the blog post: date line, current-rates table (rate + effective date + ▲▼ comparison), historical-rates table (prepends new row)
-   - Sends an alert email to `info@flyasia.co`
-5. **Interactive charts** live in Google Sheets and are embedded in the blog post as iframes — they update automatically with the data, have a proportional time axis, and support hover tooltips
+   - Appends a new row to the `YQ Data` sheet and rebuilds step-chart data → charts update automatically
+   - Fetches the live post content and applies updates: date line, current-rates table (rate + effective date + ▲▼ comparison), historical-rates table (prepends new row)
+   - Proofreads the updated content with Claude Haiku
+   - Saves a WordPress autosave revision (live post untouched)
+   - Sends an approval email to `info@flyasia.co` and `heidi@flyasia.co` with a direct revision link
 
 ---
 
@@ -29,81 +30,90 @@ Short and medium haul were priced identically before 2026-03-18. From that date 
 
 ---
 
-## Sheet Structure (`YQ Data` tab)
+## Sheet Structure
 
-| Column | Header | Format | Example |
-|---|---|---|---|
-| A | `date` | YYYY-MM-DD | 2026-05-16 |
-| B | `short_haul_hkd` | Integer | 339 |
-| C | `medium_haul_hkd` | Integer | 633 |
-| D | `long_haul_hkd` | Integer | 1362 |
+| Tab | Purpose |
+|---|---|
+| `YQ Data` | One row per rate change. Columns: `date` \| `short_haul_hkd` \| `medium_haul_hkd` \| `long_haul_hkd` |
+| `_chart_data` | Hidden. Auto-generated step-chart data (bridge rows for staircase display). Do not edit manually. |
+| `_pending` | Hidden. Legacy — no longer used. Can be deleted. |
 
 ---
 
-## Prerequisites — Cloud Function Proxy
+## GCP Cloud Function Proxy
 
-Cathay Pacific's website (Akamai CDN) blocks Google Apps Script's IP range. A lightweight Cloud Function acts as a proxy — Apps Script calls it, it calls Cathay, and returns the HTML. It runs on Google Cloud Run IPs which Akamai doesn't specifically block.
+### Why it exists
 
-### Deploy the proxy (one-time, ~5 minutes)
+Cathay Pacific's website is served via Akamai CDN, which blocks Google Apps Script's IP range. A lightweight Google Cloud Function acts as a proxy — Apps Script calls the function, the function fetches Cathay's page from GCP Cloud Run IPs (which Akamai doesn't flag), and returns the HTML.
 
-**Requirements:** [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk/docs/install) installed and authenticated. Any GCP project works — this stays within the free tier (2M requests/month free).
+### Current deployment (flyasia-automation)
 
-**1. Pick a GCP project**
+| Detail | Value |
+|---|---|
+| GCP project | `project-b815d528-9385-4925-8ae` (flyasia-automation) |
+| Function name | `cathayProxy` |
+| Region | `asia-east1` (Hong Kong) |
+| Runtime | Node.js 22 |
+| Memory | 256 MiB |
+| Timeout | 30 s |
+| Auth | `--allow-unauthenticated` + `PROXY_API_KEY` header check |
+| URL | `https://asia-east1-project-b815d528-9385-4925-8ae.cloudfunctions.net/cathayProxy` |
+| Cost | Free tier — 2M invocations/month free; this function runs at most ~720×/month |
+
+### How to redeploy (e.g. after code changes)
+
 ```bash
-gcloud config set project YOUR_PROJECT_ID
-```
+gcloud config set project project-b815d528-9385-4925-8ae
 
-**2. Enable the Cloud Functions API** (first time only)
-```bash
-gcloud services enable cloudfunctions.googleapis.com
-```
-
-**3. Generate an API key** (any random string — save it)
-```bash
-openssl rand -hex 16
-# e.g. → a3f8c2d1e4b5a6f7c8d9e0f1a2b3c4d5
-```
-
-**4. Deploy**
-
-From the repo root:
-```bash
 gcloud functions deploy cathayProxy \
-  --runtime nodejs20 \
+  --runtime nodejs22 \
   --region asia-east1 \
   --trigger-http \
   --allow-unauthenticated \
-  --set-env-vars PROXY_API_KEY=YOUR_KEY_FROM_STEP_3 \
+  --set-env-vars PROXY_API_KEY=YOUR_EXISTING_KEY \
   --timeout 30 \
-  --memory 128MB \
+  --memory 256MiB \
   --source fuel-surcharge-cathay/proxy
 ```
 
-Deployment takes ~2 minutes. When it finishes, copy the **url** printed at the end:
+The PROXY_API_KEY is stored in Apps Script Script Properties — use the same value so the key doesn't need to change.
+
+### How to deactivate (temporarily pause)
+
+Delete just the PROXY_URL Script Property in the Apps Script editor. Without it, the script falls back to direct fetch (which will be blocked by Akamai and time out). Effectively pauses the scraper without touching GCP.
+
+To re-enable: add `PROXY_URL` back to Script Properties.
+
+### How to decommission (permanently shut down)
+
+```bash
+# Delete the Cloud Function
+gcloud functions delete cathayProxy --region asia-east1
+
+# Optional: disable the APIs if not used by other projects
+gcloud services disable cloudfunctions.googleapis.com
+gcloud services disable cloudbuild.googleapis.com
 ```
-url: https://asia-east1-YOUR_PROJECT_ID.cloudfunctions.net/cathayProxy
-```
 
-**5. Add to Apps Script Properties**
+The GCP project `flyasia-automation` itself can remain (it has no ongoing charges) or be deleted via the GCP Console → IAM & Admin → Manage Resources.
 
-In the Apps Script editor → ⚙️ Project Settings → Script Properties, add:
+### How to adopt this pattern for a new project
 
-| Property | Value |
-|---|---|
-| `PROXY_URL` | `https://asia-east1-YOUR_PROJECT_ID.cloudfunctions.net/cathayProxy` |
-| `PROXY_API_KEY` | *(the key you generated in step 3)* |
-
-After this, **Test Scrape Only** from the YQ Monitor menu should complete in under 10 seconds.
-
----
-
-## Prerequisites — Revisionary Plugin
-
-The approval flow requires the **Revisionary** plugin on WordPress. Without it, pending revisions cannot be created and rate changes will not reach the blog.
-
-1. In WordPress admin: **Plugins → Add New** → search **Revisionary** → Install and Activate
-2. The plugin intercepts REST API posts with `status: pending-revision` and queues them as pending revisions
-3. Editors receive an approval request email and can publish from **Posts → Pending Revisions** in WP admin
+1. Write a new proxy in `your-project/proxy/index.js` following the same pattern as `fuel-surcharge-cathay/proxy/index.js`
+2. Deploy with a new function name and optionally a new project:
+   ```bash
+   gcloud functions deploy myNewProxy \
+     --runtime nodejs22 \
+     --region asia-east1 \
+     --trigger-http \
+     --allow-unauthenticated \
+     --set-env-vars PROXY_API_KEY=NEW_KEY \
+     --timeout 30 \
+     --memory 256MiB \
+     --source your-project/proxy
+   ```
+3. Store the URL and key in the new Apps Script project's Script Properties under `PROXY_URL` and `PROXY_API_KEY`
+4. Call `fetchUrl(targetUrl)` — the same pattern used here works as-is
 
 ---
 
@@ -113,7 +123,6 @@ The approval flow requires the **Revisionary** plugin on WordPress. Without it, 
 2. Rename the default tab to `YQ Data`
 3. Add headers in row 1: `date` | `short_haul_hkd` | `medium_haul_hkd` | `long_haul_hkd`
 4. **File → Import** → upload `cx_yq_history.csv` → **Append to current sheet**
-   - This imports 26 historical rate periods going back to November 2018
 5. Note the Spreadsheet ID from the URL: `https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`
 
 ---
@@ -149,58 +158,57 @@ Replace with the actual Sheet ID from Step 1.
 ## Step 5 — Set Script Properties (Credentials)
 
 1. Click **⚙️ Project Settings** → **Script Properties** tab
-2. Add:
+2. Add all of the following:
 
 | Property | Value |
 |---|---|
 | `WP_USERNAME` | `ai@flyasia.co` |
 | `WP_APP_PASSWORD` | *(WordPress application password for ai@flyasia.co)* |
-| `ANTHROPIC_API_KEY` | *(your Anthropic API key — for Claude proofread)* |
-
-> **ANTHROPIC_API_KEY**: Available at [console.anthropic.com](https://console.anthropic.com). If omitted, the proofread step is skipped silently.
+| `ANTHROPIC_API_KEY` | *(Anthropic API key — for Claude proofread; omit to skip)* |
+| `PROXY_URL` | `https://asia-east1-project-b815d528-9385-4925-8ae.cloudfunctions.net/cathayProxy` |
+| `PROXY_API_KEY` | *(the key set when deploying the Cloud Function)* |
 
 ---
 
 ## Step 6 — Authorize and Test
 
-1. Select `triggerManualRun` from the function dropdown and click **▶ Run**
+1. Select `testScrapeOnly` from the function dropdown and click **▶ Run**
 2. When prompted, click **Review permissions → Allow**
 3. Click **Advanced → Go to [project name] (unsafe)** if prompted
-4. Check the Executions log — you should see the scraped short/medium/long values
+4. Check the Executions log — you should see the scraped short/medium/long values within ~3 seconds
 
 ---
 
 ## Step 7 — Set Up Interactive Charts
 
-This is a one-time setup to create the 3 trend charts in the sheet and embed them in the blog post.
+One-time setup to create the 3 trend charts and embed them in the blog post.
 
-### 7a — Create the Charts
+### 7a — Fix date format and create charts
 
-1. In the Google Sheet, click **Extensions → Apps Script** → open the Apps Script editor
-2. From the **YQ Monitor** menu (refresh the sheet first if you don't see it), click **Setup Charts (first run)**
-3. This creates 3 embedded line charts in the sheet (one per haul type) and saves their OIDs to Script Properties
+1. Refresh the Google Sheet so the **YQ Monitor** menu appears
+2. Click **YQ Monitor → Fix Sheet Dates (one-time)** — converts any text-string dates in column A to proper Date values so the chart X-axis is time-proportional
+3. Click **YQ Monitor → Setup Charts (first run)** — creates 3 line charts in the sheet and saves their OIDs to Script Properties
 
-### 7b — Publish the Sheet
+### 7b — Publish the sheet
 
-The charts need to be publicly accessible for the iframe embeds to work without login:
+Charts must be publicly accessible for the iframe embeds to work:
 
-1. In the Google Sheet: **File → Share → Publish to the web**
-2. Leave defaults (Entire Document → Web page) and click **Publish**
-3. Click **OK** to confirm
+1. **File → Share → Publish to the web**
+2. Leave defaults (Entire Document → Web page) → **Publish** → **OK**
 
-### 7c — Insert Charts into the Blog Post
+### 7c — Insert charts into the blog post
 
-1. From the **YQ Monitor** menu, click **Insert Charts into Post**
-2. This replaces the three placeholder paragraphs in the blog post with `<!-- wp:html -->` iframe blocks
+1. Click **YQ Monitor → Insert Charts into Post**
+2. This replaces the three `[此處插入...走勢圖]` placeholders in the post with `<!-- wp:html -->` iframe blocks
 3. Verify in the WP editor that the 3 iframes are visible
 
-> After this, charts update automatically every time new data is logged. No further manual action needed for charts.
+> After this, charts update automatically every time a new rate change is logged. No further action needed.
 
 ---
 
 ## Step 8 — Create the Hourly Trigger
 
-1. Click the **clock icon (Triggers)** in the left sidebar
+1. Click the **clock icon (Triggers)** in the Apps Script left sidebar
 2. Click **+ Add Trigger**
 
 | Setting | Value |
@@ -226,27 +234,28 @@ The charts need to be publicly accessible for the iframe embeds to work without 
 
 ## Approval Flow
 
-When a rate change is detected, the script does **not** publish immediately. Instead:
+When a rate change is detected, the script does **not** publish immediately:
 
-1. **Logs** the new rates to the `YQ Data` sheet (charts update automatically)
-2. **Builds** the updated blog post content:
+1. **Logs** the new rates to `YQ Data` and rebuilds `_chart_data` → charts update automatically
+2. **Fetches** the live post content and applies updates:
    - `更新日期：` line → new date
    - Current-rates table → new rate, effective date, ▲▼ comparison for all 3 rows
    - Historical-rates table → new row prepended at top
-3. **Proofreads** the updated content using Claude Haiku (checks for numerical inconsistencies)
-4. **Saves a pending revision** via the Revisionary plugin — the live post is untouched
-5. **Sends an approval request email** to `info@flyasia.co` and `heidi@flyasia.co` with:
+3. **Proofreads** with Claude Haiku (checks for numerical inconsistencies)
+4. **Saves a WordPress autosave revision** — live post is untouched, no plugin required
+5. **Sends an approval email** to `info@flyasia.co` and `heidi@flyasia.co` with:
    - Rate changes (before → after, ▲▼ diff)
    - Claude proofread result (✓ or ⚠ with note)
-   - Direct link to the WP admin revision for one-click approval
+   - Direct link to the revision for one-click restore
 
-### To publish the pending revision
+### To publish the revision
 
-1. Open the link in the approval email, or go to **WordPress admin → Posts → [the post] → Revisions**
-2. Review the changes (diff view shows exactly what changed)
-3. Click **Approve** — the pending revision becomes the live post immediately
+1. Open the revision link in the approval email
+2. Review the diff (WP shows exactly what changed)
+3. Click **Restore This Revision**
+4. Back in the post editor, click **Update** to publish
 
-> Charts update automatically every time new data is logged, regardless of whether the revision has been approved. No manual action needed for charts.
+> Charts are already live the moment the rate change is logged, regardless of whether the revision has been approved.
 
 ---
 
@@ -254,20 +263,20 @@ When a rate change is detected, the script does **not** publish immediately. Ins
 
 The script extracts values formatted as `NNN 港幣` (e.g. `339 港幣`) from the Hong Kong rows in the desktop table view. It splits the page into three sections using two anchor strings:
 
-| Anchor | Section |
+| Anchor string | Section |
 |---|---|
 | `南亞次大陸` | Start of medium-haul (South Asia subcontinent) section |
 | `上表未提及的航班` | Start of short-haul (all other routes) section |
 | Before `南亞次大陸` | Long-haul section |
 
-If rate extractions start returning `null`, check the Executions log for `Anchor strings not found` or `Fallback used` warnings.
+If rate extractions return `null`, check the Executions log for `Anchor strings not found` or `Fallback used` warnings.
 
 To fix: inspect the page source and check:
 1. Are the anchor strings still present? → update `mediumIdx`/`shortIdx` in `extractYQRates()`
 2. Is the value format still `NNN 港幣`? → update the regex in `lastHKDInRow()`
 3. Is the 香港 row structure still `<td>香港</td>`? → update the row regex in `lastHKDInRow()`
 
-If the fetch itself is timing out (script hangs for ~60s with no output), Cathay's server may be blocking the request — check the `Accept-Language` and `User-Agent` headers in `fetchUrl()`.
+If the proxy fetch itself times out, the GCP function may need redeployment or the User-Agent header may need updating.
 
 ---
 
@@ -275,14 +284,16 @@ If the fetch itself is timing out (script hangs for ~60s with no output), Cathay
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `extractYQRates` returns null | Cathay changed page HTML | Update regex in `extractYQRates()` |
-| Wrong value in 中途 (medium) | Fallback pattern B picked wrong number | Inspect HTML, update primary Pattern A |
-| Charts not visible on blog | Sheet not published or OIDs not set | Re-run Step 7b and 7c |
-| Iframes show "You need access" | Sheet sharing permissions | Publish to the web (Step 7b) |
+| Fetch times out or returns 403 | Akamai started blocking the proxy IP | Redeploy the Cloud Function (new IPs assigned) |
+| `extractYQRates` returns null | Cathay changed page HTML | Update anchors or regex in `extractYQRates()` |
+| Wrong value in 中途 (medium) | Fallback pattern picked wrong number | Inspect HTML, update primary Pattern A |
 | Blog date/rates not updating | Regex mismatch in post content | Check `updateDateLine()` / `replaceRateRow()` patterns |
-| Historical table not updated | `生效日期` heading pattern changed | Update `prependHistoryRow()` regex |
-| WP POST fails (401) | Wrong credentials | Re-check `WP_USERNAME` and `WP_APP_PASSWORD` |
-| Pending revision not created | Revisionary plugin not installed or inactive | Install and activate Revisionary (see Prerequisites section) |
-| Approval email not received | Wrong recipients or `from` alias not set up | Verify `ALERT_EMAIL` / `HEIDI_EMAIL` constants and `info@flyasia.co` Send As alias |
-| Claude proofread skipped | `ANTHROPIC_API_KEY` not set | Add the property in Project Settings → Script Properties |
-| Revision link in email is broken | Revisionary returns different revision ID field | Go to WP admin → Posts → Revisions to find pending revision manually |
+| Historical table not updated | Anchor string changed | Update `prependHistoryRow()` anchor |
+| WP autosave fails (401) | Wrong credentials | Re-check `WP_USERNAME` and `WP_APP_PASSWORD` in Script Properties |
+| Approval email not received | Wrong recipients or Send As alias missing | Verify `ALERT_EMAIL` / `HEIDI_EMAIL` constants and `info@flyasia.co` Send As alias in Gmail |
+| Claude proofread skipped | `ANTHROPIC_API_KEY` not set | Add property in Project Settings → Script Properties |
+| Charts not visible on blog | Sheet not published or OIDs not set | Re-run Steps 7b and 7c |
+| Iframes show "You need access" | Sheet not published to web | Publish sheet (Step 7b) |
+| Chart X-axis shows equal spacing | Column A dates stored as text | Run **YQ Monitor → Fix Sheet Dates (one-time)**, then re-run Setup Charts |
+| Chart shows slope instead of flat line | `_chart_data` sheet missing or stale | Run **YQ Monitor → Setup Charts (first run)** to rebuild |
+| WP post content fetched as empty | Post was created without content | Paste full template into WP post and save before running the monitor |
