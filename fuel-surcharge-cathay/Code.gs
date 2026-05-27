@@ -340,6 +340,15 @@ function updateDateLine(content, date) {
 }
 
 // Updates the 3 rows in the current-rates table (rate, effective date, ▲▼ comparison)
+// and the inline short-haul round-trip example in the paragraph below the table.
+//
+// Current-rates table structure (new template):
+//   <tr>
+//     <td><strong>短途</strong><br>destinations</td>
+//     <td>HK$339</td>
+//     <td>2026 年 5 月 16 日起</td>
+//     <td>▼ HK$50</td>
+//   </tr>
 function updateCurrentRatesTable(content, current, prev, date) {
   const effectiveDate = `${formatChineseDate(date)}起`;
 
@@ -347,17 +356,33 @@ function updateCurrentRatesTable(content, current, prev, date) {
   content = replaceRateRow(content, '中途', current.medium, prev.medium, effectiveDate);
   content = replaceRateRow(content, '長途', current.long,   prev.long,   effectiveDate);
 
+  // Update the inline round-trip example sentence below the table:
+  // "短途機票來回兩程的燃油附加費為 HK$339 x 2 = HK$678"
+  content = content.replace(
+    /短途機票來回兩程的燃油附加費為 HK\$[\d,]+ x 2 = HK\$[\d,]+/,
+    `短途機票來回兩程的燃油附加費為 ${formatHKD(current.short)} x 2 = ${formatHKD(current.short * 2)}`
+  );
+
   return content;
 }
 
+// Matches the current-rates table row for 短途/中途/長途 and replaces:
+//   rate cell, effective-date cell, comparison cell.
 function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
   const diff = newRate - prevRate;
   const compareText = diff === 0 ? '—'
     : (diff > 0 ? '▲ ' : '▼ ') + formatHKD(Math.abs(diff));
 
+  // Group 1: <strong>label</strong><br>destinations</td><td>
+  // Replaced: HK$old_rate
+  // Group 2: </td><td>
+  // [^<]+: old effective date including 起 (consumed — not a group)
+  // Group 3: </td><td>   (起? matches empty since 起 consumed by [^<]+)
+  // [^<]*: old comparison text
+  // Group 4: </td>
   return content.replace(
     new RegExp(
-      `(<strong>${label}<\/strong>[\\s\\S]{0,300}?<\/td>\\s*<td>)` +
+      `(<strong>${label}<\/strong>[\\s\\S]{0,400}?<\/td>\\s*<td>)` +
       `HK\\$[\\d,]+` +
       `(<\/td>\\s*<td>)[^<]+(起?<\/td>\\s*<td>)` +
       `[^<]*(<\/td>)`
@@ -366,14 +391,16 @@ function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
   );
 }
 
-// Prepends a new row to the historical rates table
-// (the table whose <thead> contains 生效日期/短途/中途/長途)
+// Prepends a new row to the historical rates table.
+// The history table header is: 生效日期 | 短途 | 中途 | 長途
+// This is distinct from the current-rates table whose header is:
+//   航線類別 | 每程收費 | 生效日期 | 與上期對比
+// Using 生效日期</th><th>短途 as the unique anchor for the history table.
 function prependHistoryRow(content, rates, date) {
   const newRow = `<tr><td>${formatChineseDate(date)}</td><td>${formatHKD(rates.short)}</td><td>${formatHKD(rates.medium)}</td><td>${formatHKD(rates.long)}</td></tr>`;
 
-  // Find the tbody of the history table (identified by 生效日期 in its thead)
   return content.replace(
-    /(生效日期<\/th>[\s\S]{0,200}?<tbody>)/,
+    /(生效日期<\/th><th>短途<\/th>[\s\S]{0,200}?<tbody>)/,
     `$1${newRow}`
   );
 }
@@ -384,7 +411,9 @@ function prependHistoryRow(content, rates, date) {
 // to send to Claude for a sanity check.
 function extractYQKeySection(content) {
   const dateMatch = content.match(/<strong>更新日期：[^<]+<\/strong>/);
-  const rateTableMatch = content.match(/短途[\s\S]{0,1000}?長途[\s\S]{0,500}?<\/table>/);
+  // 航線類別 is the first column header of the current-rates table and appears
+  // nowhere else — use it instead of 短途 which appears throughout the post.
+  const rateTableMatch = content.match(/航線類別[\s\S]{0,2000}?<\/table>/);
   const parts = [];
   if (dateMatch)     parts.push(dateMatch[0]);
   if (rateTableMatch) parts.push(rateTableMatch[0]);
