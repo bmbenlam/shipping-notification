@@ -379,12 +379,13 @@ function replaceRateRow(content, label, newRate, prevRate, effectiveDate) {
 // This is distinct from the current-rates table whose header is:
 //   航線類別 | 每程收費 | 生效日期 | 與上期對比
 // Using 生效日期</th><th>短途 as the unique anchor for the history table.
+// Uses function replacement to avoid HK$1,362 being misread as a backreference.
 function prependHistoryRow(content, rates, date) {
   const newRow = `<tr><td>${formatChineseDate(date)}</td><td>${formatHKD(rates.short)}</td><td>${formatHKD(rates.medium)}</td><td>${formatHKD(rates.long)}</td></tr>`;
 
   return content.replace(
     /(生效日期<\/th><th>短途<\/th>[\s\S]{0,200}?<tbody>)/,
-    `$1${newRow}`
+    (_, g1) => `${g1}${newRow}`
   );
 }
 
