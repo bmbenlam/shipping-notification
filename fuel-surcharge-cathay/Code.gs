@@ -118,18 +118,17 @@ function fetchUrl(url) {
   try {
     console.log(`Fetching: ${url}`);
     const t0 = Date.now();
+
+    // Minimal headers — Akamai CDN drops or hangs connections with heavy custom header sets.
+    // Do NOT add Accept-Encoding; Apps Script handles that internally.
     const res = UrlFetchApp.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-HK,zh-TW;q=0.9,zh;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
-        'Referer': 'https://www.cathaypacific.com/cx/zh_HK/latest-news.html',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-HK,zh-TW;q=0.9,zh;q=0.8',
       },
-      followRedirects: true,
       muteHttpExceptions: true,
     });
+
     console.log(`Fetch completed in ${((Date.now() - t0) / 1000).toFixed(1)}s — HTTP ${res.getResponseCode()}`);
     if (res.getResponseCode() !== 200) {
       console.error(`HTTP ${res.getResponseCode()} for ${url}`);
