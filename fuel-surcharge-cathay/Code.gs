@@ -20,13 +20,33 @@ const HIGH_FREQ_DAYS = new Set([28, 29, 30, 31, 1, 2, 3, 13, 14, 15, 16, 17]);
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('YQ Monitor')
-    .addItem('Run Check Now',          'triggerManualRun')
+    .addItem('Run Check Now',            'triggerManualRun')
+    .addItem('Test Scrape Only',         'testScrapeOnly')
     .addItem('Setup Charts (first run)', 'setupCharts')
     .addItem('Insert Charts into Post',  'insertChartsIntoPost')
     .addToUi();
 }
 
-function triggerManualRun()      { runFuelSurchargeMonitor(); }
+function triggerManualRun() { runFuelSurchargeMonitor(); }
+
+// Fetches the Cathay page and logs extracted rates — no sheet writes, no emails, no WP update.
+// Use this to verify the scraper works without triggering the full flow or being blocked by the gate.
+function testScrapeOnly() {
+  console.log('=== Test scrape (no side effects) ===');
+  const html = fetchUrl(CATHAY_YQ_URL);
+  if (!html) { console.error('Fetch failed'); return; }
+  console.log(`Fetched ${html.length} bytes`);
+
+  const rates = extractYQRates(html);
+  if (!rates) {
+    console.error('extractYQRates returned null — check logs above for detail');
+    return;
+  }
+  console.log(`short  = ${rates.short}  HKD (${formatHKD(rates.short)})`);
+  console.log(`medium = ${rates.medium} HKD (${formatHKD(rates.medium)})`);
+  console.log(`long   = ${rates.long}   HKD (${formatHKD(rates.long)})`);
+  console.log('=== Done ===');
+}
 
 // ── Main Logic ──────────────────────────────────────────────────
 
